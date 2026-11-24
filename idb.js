@@ -2,7 +2,7 @@
    localStorage's ~5MB — so embedded image data-URIs persist reliably.
    Falls back gracefully; callers handle the unavailable case. */
 window.KV = (function () {
-  const DBN = "bff-store", STORE = "kv", VER = 1;
+  const DBN = "giantbike-store", STORE = "kv", VER = 1;
   let dbp = null;
   const available = (() => { try { return !!window.indexedDB; } catch (e) { return false; } })();
 
