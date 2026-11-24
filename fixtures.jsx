@@ -25,6 +25,9 @@ function setStock(key, val) {
   else s[key] = { qty: Math.max(0, Math.round(+val)), by: v ? v.name : { zh: "—", en: "—" }, at: Date.now() };
   saveStock(s);
   window.dispatchEvent(new CustomEvent("bff:stockchange"));
+  if (s[key] && window.SHEETS && window.SHEETS.pushStockDebounced) {
+    window.SHEETS.pushStockDebounced(key, s[key]);
+  }
 }
 function resetStock() { saveStock({}); window.dispatchEvent(new CustomEvent("bff:stockchange")); }
 

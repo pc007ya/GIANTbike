@@ -821,12 +821,25 @@
       if (looksLikeHash(snap.adminCode)) { try { localStorage.setItem("bff:admincode", snap.adminCode); } catch (e) {} }
       else { window.bffSha256(snap.adminCode).then((h) => { try { localStorage.setItem("bff:admincode", h); } catch (e) {} }); }
     }
+    if (snap.sheetsConfig && typeof snap.sheetsConfig === "object") {
+      try { localStorage.setItem("bff:sheetsconfig", JSON.stringify(snap.sheetsConfig)); } catch (e) {}
+    }
     if (migrateEquip()) save(KEYS.items, items);
     emit();
     setTimeout(() => { applyingRemote = false; }, 0);
   }
   const isApplyingRemote = () => applyingRemote;
-  const snapshotData = () => ({ items: clone(items), vendors: clone(vendors), parts: clone(parts), equipment: clone(equipment), testcodes: clone(testcodes), bikecats: clone(bikecats), log: clone(log), adminCode: admincode_get() });
+  const snapshotData = () => ({ items: clone(items), vendors: clone(vendors), parts: clone(parts), equipment: clone(equipment), testcodes: clone(testcodes), bikecats: clone(bikecats), log: clone(log), adminCode: admincode_get(), sheetsConfig: sheets_get() });
+
+  function sheets_get() {
+    try { return JSON.parse(localStorage.getItem("bff:sheetsconfig") || "null") || {}; }
+    catch (e) { return {}; }
+  }
+  function sheets_set(cfg) {
+    try { localStorage.setItem("bff:sheetsconfig", JSON.stringify(cfg || {})); } catch (e) {}
+    addLog({ action: "update", entity: "system", targetId: "sheets", targetName: { zh: "Google 試算表連動", en: "Google Sheets sync" }, changes: [{ zh: cfg && cfg.enabled ? "已更新並啟用 Google 試算表同步" : "已更新 Google 試算表同步設定", en: "Updated Google Sheets sync config" }] });
+    emit();
+  }
 
   function admincode_get() { try { return localStorage.getItem("bff:admincode") || DEFAULT_ADMIN_HASH; } catch (e) { return DEFAULT_ADMIN_HASH; } }
   async function admincode_set(code) {
@@ -879,7 +892,7 @@
     testcodes_list, testcodes_get, testcodes_save, testcodes_delete, blankTestcode, newTestcodeKey, testcodes_forVendor, testcodes_itemIdsForVendor, nextTestcodeCode,
     bikecats_list, bikecats_add, bikecats_remove,
     exportSnapshot, importSnapshot, hydrate, isApplyingRemote, snapshotData,
-    admincode_get, admincode_set,
+    admincode_get, admincode_set, sheets_get, sheets_set,
     log_list, addLog, resetAll,
     stepphoto_get, stepphoto_set, stepphoto_remove, stepphoto_forVendor, stepphoto_allSubmissions,
     // cloud-sync accessors: read/write the IDB-backed step-photo map for a vendor

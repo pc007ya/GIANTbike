@@ -553,6 +553,45 @@ function BackupPanel({ lang }) {
     setGhCfg(window.GH_STORAGE.clearToken());
     setMsg({ ok: true, t: lang === "zh" ? "已清除本機 GitHub Token（改為內嵌 WebP 模式）。" : "Cleared local GitHub token (switched to inline WebP mode)." });
   }
+  const [shCfg, setShCfg] = mState(() => (window.SHEETS ? window.SHEETS.getConfig() : { enabled: false, url: "", secret: "", sheetUrl: "" }));
+  const [shBusy, setShBusy] = mState(false);
+  function saveShCfg() {
+    if (!window.SHEETS) return;
+    const next = Object.assign({}, shCfg, { enabled: !!(shCfg.url && shCfg.url.trim()) ? shCfg.enabled : false });
+    const saved = window.SHEETS.setConfig(next);
+    setShCfg(saved);
+    setMsg({ ok: true, t: lang === "zh"
+      ? (saved.enabled ? "已儲存並啟用 Google 試算表自動同步（已同步至雲端，所有供應商即刻生效）。" : "已儲存 Google 試算表設定（目前為停用狀態）。")
+      : (saved.enabled ? "Saved & enabled Google Sheets auto-sync (synced to all vendors)." : "Saved Google Sheets settings (disabled).") });
+  }
+  async function testSh() {
+    if (!window.SHEETS) return;
+    if (!shCfg.url || !/^https:\/\//i.test(shCfg.url.trim())) {
+      setMsg({ ok: false, t: lang === "zh" ? "請先貼上以 https:// 開頭的 Apps Script 網頁應用程式網址。" : "Enter a valid https:// Apps Script Web App URL first." });
+      return;
+    }
+    setShBusy(true);
+    try {
+      const r = await window.SHEETS.testConnection(shCfg);
+      setMsg({ ok: true, t: lang === "zh"
+        ? `Google 試算表連線成功！已連上「${r.spreadsheet || "試算表"}」（工作表：${(r.sheets || []).join("、")}）。記得勾選啟用並按儲存。`
+        : `Connected to Google Sheet "${r.spreadsheet || "Sheet"}" (tabs: ${(r.sheets || []).join(", ")}).` });
+    } catch (e) {
+      setMsg({ ok: false, t: (lang === "zh" ? "試算表連線失敗（請確認 Apps Script 部署權限為「所有人」）：" : "Sheets test failed: ") + (e && e.message || e) });
+    }
+    setShBusy(false);
+  }
+  async function copyScript() {
+    try {
+      const resp = await fetch("google-apps-script/Code.gs");
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const txt = await resp.text();
+      await navigator.clipboard.writeText(txt);
+      setMsg({ ok: true, t: lang === "zh" ? "已複製 Apps Script 程式碼！請到 Google 試算表 → 擴充功能 → Apps Script 貼上並部署為網頁應用程式。" : "Copied Apps Script code! Paste into Google Sheets → Extensions → Apps Script and deploy as Web App." });
+    } catch (e) {
+      setMsg({ ok: false, t: lang === "zh" ? "無法自動複製，請直接開啟專案內的 google-apps-script/Code.gs 複製。" : "Could not copy automatically; open google-apps-script/Code.gs directly." });
+    }
+  }
   async function migrate() {
     if (!window.bffStorageAvailable || !window.bffStorageAvailable()) {
       setMsg({ ok: false, t: lang === "zh" ? "請先在上方填入 GitHub Fine-grained Token 並點「儲存設定」，即可開始將照片搬移到 GitHub。" : "Save your GitHub Fine-grained Token above first to migrate images to GitHub." });
@@ -666,6 +705,36 @@ function BackupPanel({ lang }) {
             <button className="btn sm" onClick={migrate} disabled={migBusy || !ghReady}><Icon name="upload" size={14} />{migBusy ? (lang === "zh" ? "搬移中…" : "Migrating…") : (lang === "zh" ? "一鍵搬移舊圖到 GitHub (WebP)" : "Migrate images to GitHub (WebP)")}</button>
             {ghCfg.token && <button className="btn ghost sm" onClick={clearGhToken}>{lang === "zh" ? "清除 Token" : "Clear token"}</button>}
             {migBusy && migProg && <span className="bk-p mono" style={{ margin: 0 }}>{lang === "zh" ? "已處理" : "done"} {migProg.moved}/{migProg.scanned}{migProg.failed ? " · " + (lang === "zh" ? "失敗" : "failed") + " " + migProg.failed : ""}</span>}
+          </div>
+        </div>
+      </div>
+      <div className="bk-card">
+        <div className="bk-icon"><Icon name="file" size={22} /></div>
+        <div className="bk-main">
+          <h3 className="bk-h">{lang === "zh" ? "Google 試算表自動連動（盤點總表 / 測試報告 / 異常申請）" : "Google Sheets auto-sync (Stock / Reports / Anomalies)"}</h3>
+          <p className="bk-p">{lang === "zh" ?
+            "供應商送出庫存盤點、測試報告或異常申請時，背景自動寫入 Google 試算表對應分頁。貼上 Apps Script 網頁應用程式網址並儲存後，全體供應商立即生效。" :
+            "Automatically appends vendor stock-takes, test reports, and anomaly requests to your Google Sheet tabs. Once saved, syncs to all vendors via cloud."}</p>
+          <Field label={lang === "zh" ? "Apps Script 網頁應用程式網址（Web App URL）" : "Apps Script Web App URL"}>
+            <input className="inp mono" value={shCfg.url} onChange={(e) => setShCfg({ ...shCfg, url: e.target.value })} placeholder="https://script.google.com/macros/s/…/exec" />
+          </Field>
+          <div className="ed-grid" style={{ marginTop: 10 }}>
+            <Field label={lang === "zh" ? "Google 試算表檢視網址（方便後台快速開啟）" : "Google Sheet URL (quick link)"}>
+              <input className="inp mono" value={shCfg.sheetUrl} onChange={(e) => setShCfg({ ...shCfg, sheetUrl: e.target.value })} placeholder="https://docs.google.com/spreadsheets/d/…" />
+            </Field>
+            <Field label={lang === "zh" ? "自訂密鑰（選填，須與 Apps Script 一致）" : "Shared secret (optional)"}>
+              <input className="inp mono" type="password" value={shCfg.secret} onChange={(e) => setShCfg({ ...shCfg, secret: e.target.value })} placeholder={lang === "zh" ? "留空代表不檢查" : "Leave blank if unused"} autoComplete="off" />
+            </Field>
+          </div>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: 10, fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>
+            <input type="checkbox" checked={!!shCfg.enabled} onChange={(e) => setShCfg({ ...shCfg, enabled: e.target.checked })} />
+            <span>{lang === "zh" ? "啟用自動同步到 Google 試算表" : "Enable automatic sync to Google Sheets"}</span>
+          </label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12, alignItems: "center" }}>
+            <button className="btn sm" onClick={saveShCfg}><Icon name="check" size={14} />{lang === "zh" ? "儲存設定" : "Save settings"}</button>
+            <button className="btn ghost sm" onClick={testSh} disabled={shBusy || !shCfg.url}><Icon name="cloud" size={14} />{shBusy ? (lang === "zh" ? "測試中…" : "Testing…") : (lang === "zh" ? "測試連線" : "Test connection")}</button>
+            <button className="btn ghost sm" onClick={copyScript}><Icon name="file" size={14} />{lang === "zh" ? "複製 Apps Script 程式碼" : "Copy Apps Script code"}</button>
+            {shCfg.sheetUrl && <a className="btn ghost sm" href={shCfg.sheetUrl} target="_blank" rel="noopener" style={{ textDecoration: "none" }}><Icon name="file" size={14} />{lang === "zh" ? "開啟試算表" : "Open Sheet"}</a>}
           </div>
         </div>
       </div>

@@ -632,6 +632,7 @@ function App() {
   const goManage = () => {location.hash = "#/manage";};
   const goHistory = () => {location.hash = "#/history";};
   const goResults = () => {location.hash = "#/results";};
+  const goAnomaly = () => {location.hash = "#/anomaly";};
   const editItem = (id) => {location.hash = "#/edit/" + id;};
   const back = () => {location.hash = route.name === "fixtureDetail" ? "#/fixtures" : "";};
   const item = route.name === "detail" ? window.DATA.ITEMS.find((i) => i.id === route.id) : null;
@@ -684,6 +685,9 @@ function App() {
               <button className={"topnav-btn" + (route.name === "results" ? " on" : "")} onClick={goResults}>
                 <Icon name="grid" size={15} />{lang === "zh" ? "測試結果" : "Results"}
               </button>
+              <button className={"topnav-btn" + (route.name === "anomaly" ? " on" : "")} onClick={goAnomaly}>
+                <Icon name="file" size={15} />{lang === "zh" ? "異常申請" : "Anomalies"}
+              </button>
               <button className={"topnav-btn" + (route.name === "history" ? " on" : "")} onClick={goHistory}>
                 <Icon name="clock" size={15} />{lang === "zh" ? "變更歷史" : "History"}
               </button>
@@ -696,6 +700,11 @@ function App() {
           {!admin &&
           <button className={"topnav-btn" + (route.name === "equipStock" ? " on" : "")} onClick={goEquipStock}>
               <Icon name="bolt" size={15} />{lang === "zh" ? "設備盤點" : "Equipment"}
+            </button>
+          }
+          {!admin &&
+          <button className={"topnav-btn" + (route.name === "anomaly" ? " on" : "")} onClick={goAnomaly}>
+              <Icon name="file" size={15} />{lang === "zh" ? "異常申請" : "Anomaly"}
             </button>
           }
           {!admin &&
@@ -746,6 +755,8 @@ function App() {
         admin ? <EquipmentAdminDashboard lang={lang} t={t} /> : <EquipmentStockEntry lang={lang} t={t} /> :
         route.name === "notices" ?
         <VendorNoticesPage lang={lang} t={t} goStock={goStock} goEquip={goEquipStock} /> :
+        route.name === "anomaly" ?
+        <AnomalyPage lang={lang} vendor={vendor} admin={admin} /> :
         route.name === "manage" ?
         admin ? <AdminManage lang={lang} t={t} onEdit={editItem} /> : <Home lang={lang} t={t} theme={tw.direction} onOpen={open} vendor={vendor} admin={admin} /> :
         route.name === "edit" ?
@@ -820,6 +831,7 @@ function parseRoute() {
   if (h.startsWith("#/edit/")) return { name: "edit", id: h.replace("#/edit/", "") };
   if (h.startsWith("#/history")) return { name: "history" };
   if (h.startsWith("#/notices")) return { name: "notices" };
+  if (h.startsWith("#/anomaly")) return { name: "anomaly" };
   if (h.startsWith("#/results")) return { name: "results" };
   return { name: "list" };
 }

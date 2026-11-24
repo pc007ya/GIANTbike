@@ -162,6 +162,9 @@ function ReportPanel({ item, lang, t, vendor, admin, onZoom }) {
       by: vendor ? vendor.name : { zh: "—", en: "—" }, at: Date.now(),
     };
     setReport(vid, item.id, report);
+    if (window.SHEETS && window.SHEETS.pushReport) {
+      window.SHEETS.pushReport(vendor, item, report);
+    }
     setSaved(true);
   }
   function clearReport() {
