@@ -2,19 +2,18 @@
    Overlays editable copies of ITEMS and VENDORS onto the static defaults,
    and records every admin change for the History page.
    Must load AFTER data.js + auth.js, BEFORE the babel component scripts. */
-  /* ---- shared image downscale -> JPEG data-URI ----
+  /* ---- shared image downscale -> WebP data-URI ----
      Admin uploads (制具圖 / 設備圖 / 步驟圖 / 示意圖) and vendor report photos are
-     stored as data-URIs and synced INSIDE Firestore documents (master doc
-     capped at 1 MiB overall; per-vendor report docs should stay small too).
+     downscaled and encoded to WebP (smaller than JPEG at comparable quality).
      Every upload is:
        1) rejected up front if the SOURCE file is absurdly large (>20MB) —
           avoids freezing the tab trying to decode a huge phone/DSLR photo.
        2) rejected if it doesn't decode as an image (blocks non-image files
           masquerading with an image extension; SVGs are rasterized by the
           canvas draw below, which strips any embedded script/markup).
-       3) downscaled + JPEG-compressed, then RE-COMPRESSED in a loop (lower
-          quality, smaller max dimension) until the result is under
-          BFF_UPLOAD_CAP_BYTES (2MB) or a retry budget is exhausted. */
+       3) downscaled + WebP-compressed (falling back to JPEG only on browsers
+          without canvas WebP encoding), then RE-COMPRESSED in a loop until
+          under capBytes or retry budget is exhausted. */
   const BFF_MAX_SOURCE_BYTES = 20 * 1024 * 1024; // 20MB — refuse before even reading
   const BFF_UPLOAD_CAP_BYTES = 2 * 1024 * 1024;  // 2MB — auto re-compress toward this
 
@@ -26,16 +25,20 @@
     return Math.floor(b64.length * 0.75);
   };
 
-  function bffRenderToJpeg(img, maxPx, quality, fallback) {
+  function bffRenderToWebp(img, maxPx, quality, fallback) {
     let w = img.width, h = img.height;
     const scale = Math.min(1, maxPx / Math.max(w, h));
     w = Math.max(1, Math.round(w * scale)); h = Math.max(1, Math.round(h * scale));
     const cv = document.createElement("canvas");
     cv.width = w; cv.height = h;
     const ctx = cv.getContext("2d");
-    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, w, h); // flatten transparency for JPEG
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, w, h); // consistent opaque backdrop across themes
     ctx.drawImage(img, 0, 0, w, h);
-    try { return cv.toDataURL("image/jpeg", quality); } catch (e) { return fallback; } // tainted/unsupported -> fall back
+    try {
+      const webp = cv.toDataURL("image/webp", quality);
+      if (typeof webp === "string" && webp.slice(0, 15) === "data:image/webp") return webp;
+      return cv.toDataURL("image/jpeg", quality); // fallback for browsers without WebP encoder
+    } catch (e) { return fallback; }
   }
 
   window.bffResizeImage = function (file, maxPx, quality, capBytes) {
@@ -49,23 +52,20 @@
         img.onerror = () => reject(new Error("decode-failed"));
         img.onload = () => {
           const cap = capBytes || BFF_UPLOAD_CAP_BYTES;
-          let px = maxPx || 1200, q = quality || 0.72;
-          let out = bffRenderToJpeg(img, px, q, fr.result);
+          let px = maxPx || 1200, q = quality || 0.78;
+          let out = bffRenderToWebp(img, px, q, fr.result);
           let tries = 0;
           while (window.bffDataUriBytes(out) > cap && tries < 5) {
             q = Math.max(0.35, q - 0.12);
             px = Math.max(480, Math.round(px * 0.85));
-            const next = bffRenderToJpeg(img, px, q, out);
+            const next = bffRenderToWebp(img, px, q, out);
             if (!next) break;
             out = next;
             tries++;
           }
-          // Guarantee JPEG output: every uploaded photo must be JPEG-encoded.
-          // The only way `out` is non-JPEG is a tainted/cross-origin canvas,
-          // which cannot happen for a local FileReader upload — but enforce it
-          // explicitly so a PNG/HEIC can never slip through and be stored as-is.
+          // Guarantee WebP output (or JPEG fallback if browser lacks WebP encoding)
           if (typeof out !== "string" || out.slice(0, 11) !== "data:image/") { reject(new Error("encode-failed")); return; }
-          if (out.slice(0, 15) !== "data:image/jpeg") { reject(new Error("not-jpeg")); return; }
+          if (out.slice(0, 15) !== "data:image/webp" && out.slice(0, 15) !== "data:image/jpeg") { reject(new Error("not-webp")); return; }
           resolve(out);
         };
         img.src = fr.result;
@@ -74,29 +74,39 @@
     });
   };
 
-  /* Re-compress an existing data-URI image (used by the maintenance/compact tool). */
-  window.bffCompressDataUri = function (uri, maxPx, quality, capBytes) {
+  /* Re-compress an existing data-URI image to WebP (used by compact/migration tools). */
+  window.bffCompressDataUri = function (uri, maxPx, quality, capBytes, forceWebp) {
     return new Promise((resolve) => {
       if (typeof uri !== "string" || uri.slice(0, 11) !== "data:image/") { resolve(uri); return; }
       const img = new Image();
       img.onerror = () => resolve(uri);
       img.onload = () => {
         const cap = capBytes || BFF_UPLOAD_CAP_BYTES;
-        let px = maxPx || 1200, q = quality || 0.72;
-        let out = bffRenderToJpeg(img, px, q, uri);
+        let px = maxPx || 1200, q = quality || 0.78;
+        let out = bffRenderToWebp(img, px, q, uri);
         let tries = 0;
         while (window.bffDataUriBytes(out) > cap && tries < 5) {
           q = Math.max(0.35, q - 0.12);
           px = Math.max(480, Math.round(px * 0.85));
-          const next = bffRenderToJpeg(img, px, q, out);
+          const next = bffRenderToWebp(img, px, q, out);
           if (!next) break;
           out = next;
           tries++;
         }
+        if (forceWebp && typeof out === "string" && out.slice(0, 15) === "data:image/webp") { resolve(out); return; }
         resolve(out.length < uri.length ? out : uri); // keep whichever is smaller
       };
       img.src = uri;
     });
+  };
+
+  /* Fetch an external image URL (e.g. legacy Firebase Storage URL) and convert to WebP data-URI. */
+  window.bffImageUrlToWebp = async function (url, maxPx, quality) {
+    const resp = await fetch(url, { mode: "cors" });
+    if (!resp.ok) throw new Error("http-" + resp.status);
+    const blob = await resp.blob();
+    const typed = blob.type && blob.type.startsWith("image/") ? blob : new Blob([blob], { type: "image/jpeg" });
+    return window.bffResizeImage(typed, maxPx || 1200, quality || 0.78);
   };
 
   /* ---- SHA-256 hex digest (Web Crypto; falls back to a non-cryptographic
@@ -554,35 +564,50 @@
     return { scanned, shrunk, before, after };
   }
 
-  /* One-time migration: move every remaining base64 data-URI image in the
-     master data OUT to Firebase Storage, replacing it with the returned https
-     URL. Shrinks the Firestore master doc dramatically. No-op offline (returns
-     moved:0). Safe to re-run — already-URL images are skipped. */
-  async function migrateImagesToStorage(onProgress) {
+  /* One-time migration: move every base64 data-URI and legacy Firebase Storage
+     URL in the master data OUT to GitHub (as WebP under media/catalog/...),
+     replacing it with the returned raw.githubusercontent.com URL.
+     Safe to re-run — images already hosted on GitHub or local relative paths
+     are skipped. */
+  const _isFirebaseImg = (s) => typeof s === "string" && /firebasestorage\.(googleapis\.com|app)/i.test(s);
+  const _needsGitHubMove = (s) => _isDataImg(s) || _isFirebaseImg(s);
+  async function migrateImagesToGitHub(onProgress) {
     if (!window.bffStorageAvailable || !window.bffStorageAvailable()) {
-      return { available: false, scanned: 0, moved: 0, failed: 0 };
+      return { available: false, scanned: 0, moved: 0, failed: 0, corsFailed: 0 };
     }
-    let scanned = 0, moved = 0, failed = 0;
-    async function move(uri, path) {
+    let scanned = 0, moved = 0, failed = 0, corsFailed = 0;
+    async function move(src, path, maxPx) {
       scanned++;
       try {
-        const url = await window.bffUploadDataUri(uri, path);
-        if (typeof url === "string" && url.slice(0, 5) !== "data:") { moved++; return url; }
-        failed++; return uri;
-      } catch (e) { failed++; return uri; }
+        let webpUri = src;
+        if (_isFirebaseImg(src)) {
+          try {
+            webpUri = await window.bffImageUrlToWebp(src, maxPx || 1200, 0.78);
+          } catch (e) {
+            corsFailed++;
+            failed++;
+            return src;
+          }
+        } else if (_isDataImg(src)) {
+          webpUri = await window.bffCompressDataUri(src, maxPx || 1200, 0.78, undefined, true);
+        }
+        const url = await window.bffUploadDataUri(webpUri, path);
+        if (typeof url === "string" && /^https?:/.test(url) && !_isFirebaseImg(url)) { moved++; return url; }
+        failed++; return src;
+      } catch (e) { failed++; return src; }
     }
-    const tick = () => { if (typeof onProgress === "function") onProgress({ scanned, moved, failed }); };
+    const tick = () => { if (typeof onProgress === "function") onProgress({ scanned, moved, failed, corsFailed }); };
 
     for (const it of items) {
-      if (_isDataImg(it.schematic)) { it.schematic = await move(it.schematic, "catalog/schematic/" + it.id + ".jpg"); tick(); }
+      if (_needsGitHubMove(it.schematic)) { it.schematic = await move(it.schematic, "catalog/schematic/" + it.id + ".webp", 1400); tick(); }
       const steps = it.steps || [];
-      for (let i = 0; i < steps.length; i++) if (_isDataImg(steps[i].image)) { steps[i].image = await move(steps[i].image, "catalog/steps/" + it.id + "_" + i + ".jpg"); tick(); }
+      for (let i = 0; i < steps.length; i++) if (_needsGitHubMove(steps[i].image)) { steps[i].image = await move(steps[i].image, "catalog/steps/" + it.id + "_" + i + ".webp", 1100); tick(); }
     }
-    for (const k of Object.keys(parts)) if (_isDataImg(parts[k].image)) { parts[k].image = await move(parts[k].image, "catalog/parts/" + k + ".jpg"); tick(); }
-    for (const k of Object.keys(equipment)) if (_isDataImg(equipment[k].image)) { equipment[k].image = await move(equipment[k].image, "catalog/equipment/" + k + ".jpg"); tick(); }
+    for (const k of Object.keys(parts)) if (_needsGitHubMove(parts[k].image)) { parts[k].image = await move(parts[k].image, "catalog/parts/" + k + ".webp", 900); tick(); }
+    for (const k of Object.keys(equipment)) if (_needsGitHubMove(equipment[k].image)) { equipment[k].image = await move(equipment[k].image, "catalog/equipment/" + k + ".webp", 900); tick(); }
     for (const c of testcodes) {
-      if (_isDataImg(c.photoBike)) { c.photoBike = await move(c.photoBike, "catalog/testcodes/" + c.id + "_photoBike.jpg"); tick(); }
-      if (_isDataImg(c.photoSpec)) { c.photoSpec = await move(c.photoSpec, "catalog/testcodes/" + c.id + "_photoSpec.jpg"); tick(); }
+      if (_needsGitHubMove(c.photoBike)) { c.photoBike = await move(c.photoBike, "catalog/testcodes/" + c.id + "_photoBike.webp", 1100); tick(); }
+      if (_needsGitHubMove(c.photoSpec)) { c.photoSpec = await move(c.photoSpec, "catalog/testcodes/" + c.id + "_photoSpec.webp", 1100); tick(); }
     }
     // propagate migrated library URLs into embedded copies inside items
     items.forEach((it) => {
@@ -591,8 +616,9 @@
     });
     save(KEYS.items, items); save(KEYS.parts, parts); save(KEYS.equipment, equipment); save(KEYS.testcodes, testcodes);
     emit();
-    return { available: true, scanned, moved, failed };
+    return { available: true, scanned, moved, failed, corsFailed };
   }
+  const migrateImagesToStorage = migrateImagesToGitHub;
 
   /* ---- equipment library (EQUIPMENT) — vendor stock-take needs the MAX qty
      across tests (shared), not the sum (see equipment.jsx buildEquipUsage) ---- */
@@ -849,7 +875,7 @@
     items_list, items_get, items_save, items_delete,
     vendors_list, vendors_save, vendors_delete, nextVendorId, slugId,
     parts_list, parts_get, parts_save, parts_delete,
-    equipment_list, equipment_get, equipment_save, equipment_delete, compactImages, migrateImagesToStorage,
+    equipment_list, equipment_get, equipment_save, equipment_delete, compactImages, migrateImagesToGitHub, migrateImagesToStorage,
     testcodes_list, testcodes_get, testcodes_save, testcodes_delete, blankTestcode, newTestcodeKey, testcodes_forVendor, testcodes_itemIdsForVendor, nextTestcodeCode,
     bikecats_list, bikecats_add, bikecats_remove,
     exportSnapshot, importSnapshot, hydrate, isApplyingRemote, snapshotData,

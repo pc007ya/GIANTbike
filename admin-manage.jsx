@@ -69,14 +69,14 @@ function TestEditor({ id, lang, t, onDone }) {
   };
   function loadStepImg(i, file) {
     if (!file || !file.type.startsWith("image/")) return;
-    const path = "catalog/steps/" + (d.id || "item") + "_" + i + ".jpg";
-    window.bffUploadImage(file, 1100, 0.7, path).then((src) => {setStep(i, { image: src });setErr("");}).
+    const path = "catalog/steps/" + (d.id || "item") + "_" + i + ".webp";
+    window.bffUploadImage(file, 1100, 0.78, path).then((src) => {setStep(i, { image: src });setErr("");}).
     catch(() => setErr(lang === "zh" ? "上傳失敗（檔案不是圖片，或超過 20MB）" : "Upload failed (not an image, or over 20MB)"));
   }
   function loadSchematic(file) {
     if (!file || !file.type.startsWith("image/")) return;
-    const path = "catalog/schematic/" + (d.id || "item") + ".jpg";
-    window.bffUploadImage(file, 1400, 0.72, path).then((src) => {set({ schematic: src });setErr("");}).
+    const path = "catalog/schematic/" + (d.id || "item") + ".webp";
+    window.bffUploadImage(file, 1400, 0.78, path).then((src) => {set({ schematic: src });setErr("");}).
     catch(() => setErr(lang === "zh" ? "上傳失敗（檔案不是圖片，或超過 20MB）" : "Upload failed (not an image, or over 20MB)"));
   }
 
@@ -335,7 +335,7 @@ function PartEditor({ pkey, lang, onClose }) {
   const set = (patch) => setD((p) => ({ ...p, ...patch }));
   function loadImg(file) {
     if (!file || !file.type.startsWith("image/")) return;
-    window.bffUploadImage(file, 900, 0.72, "catalog/parts/" + (key || "part") + ".jpg").then((src) => {set({ image: src });setErr("");}).
+    window.bffUploadImage(file, 900, 0.78, "catalog/parts/" + (key || "part") + ".webp").then((src) => {set({ image: src });setErr("");}).
     catch(() => setErr(lang === "zh" ? "上傳失敗（檔案不是圖片，或超過 20MB）" : "Upload failed (not an image, or over 20MB)"));
   }
   function save() {
@@ -395,7 +395,7 @@ function EquipmentEditor({ ekey, lang, onClose }) {
   const set = (patch) => setD((p) => ({ ...p, ...patch }));
   function loadImg(file) {
     if (!file || !file.type.startsWith("image/")) return;
-    window.bffUploadImage(file, 900, 0.72, "catalog/equipment/" + (key || "equip") + ".jpg").then((src) => {set({ image: src });setErr("");}).
+    window.bffUploadImage(file, 900, 0.78, "catalog/equipment/" + (key || "equip") + ".webp").then((src) => {set({ image: src });setErr("");}).
     catch(() => setErr(lang === "zh" ? "上傳失敗（檔案不是圖片，或超過 20MB）" : "Upload failed (not an image, or over 20MB)"));
   }
   function save() {
@@ -528,21 +528,53 @@ function BackupPanel({ lang }) {
   }
   const [migBusy, setMigBusy] = mState(false);
   const [migProg, setMigProg] = mState(null);
+  const [ghCfg, setGhCfg] = mState(() => (window.GH_STORAGE ? window.GH_STORAGE.getConfig() : { owner: "pc007ya", repo: "GIANTbike", branch: "main", dir: "media", token: "" }));
+  const [ghBusy, setGhBusy] = mState(false);
+  function saveGhCfg() {
+    if (!window.GH_STORAGE) return;
+    const saved = window.GH_STORAGE.setConfig(ghCfg);
+    setGhCfg(saved);
+    setMsg({ ok: true, t: lang === "zh" ? "已儲存 GitHub 圖片設定（僅存於本機瀏覽器，不會上傳雲端）。" : "Saved GitHub image settings (stored locally in this browser only)." });
+  }
+  async function testGh() {
+    if (!window.GH_STORAGE) return;
+    window.GH_STORAGE.setConfig(ghCfg);
+    setGhBusy(true);
+    try {
+      const r = await window.GH_STORAGE.testConnection();
+      setMsg({ ok: true, t: lang === "zh" ? `GitHub 連線成功：${r.fullName}（預設分支 ${r.defaultBranch}）。現在上傳官方圖將自動轉成 WebP 存入 GitHub！` : `GitHub connected: ${r.fullName} (branch ${r.defaultBranch}). Uploads will save as WebP to GitHub.` });
+    } catch (e) {
+      setMsg({ ok: false, t: (lang === "zh" ? "GitHub 連線失敗：" : "GitHub test failed: ") + (e && e.message || e) });
+    }
+    setGhBusy(false);
+  }
+  function clearGhToken() {
+    if (!window.GH_STORAGE) return;
+    setGhCfg(window.GH_STORAGE.clearToken());
+    setMsg({ ok: true, t: lang === "zh" ? "已清除本機 GitHub Token（改為內嵌 WebP 模式）。" : "Cleared local GitHub token (switched to inline WebP mode)." });
+  }
   async function migrate() {
     if (!window.bffStorageAvailable || !window.bffStorageAvailable()) {
-      setMsg({ ok: false, t: lang === "zh" ? "雲端 Storage 未啟用或未連線。請先在 Firebase 啟用 Storage 並以管理員登入。" : "Storage not enabled / not connected. Enable Firebase Storage and sign in as admin first." });
+      setMsg({ ok: false, t: lang === "zh" ? "請先在上方填入 GitHub Fine-grained Token 並點「儲存設定」，即可開始將照片搬移到 GitHub。" : "Save your GitHub Fine-grained Token above first to migrate images to GitHub." });
       return;
     }
-    if (!window.confirm(lang === "zh" ? "將把所有內嵌圖片上傳到雲端 Storage 並改為網址，主資料會大幅縮小。過程可能需數十秒，確定開始？" : "Upload all embedded images to Storage and replace with URLs. May take a while. Start?")) return;
-    setMigBusy(true); setMigProg({ scanned: 0, moved: 0, failed: 0 });
-    setMsg({ ok: true, t: lang === "zh" ? "遷移中，請保持頁面開啟…" : "Migrating, keep the page open…" });
+    if (!window.confirm(lang === "zh" ? "將把所有舊的 Firebase Storage 照片與內嵌 base64 圖片統一轉成 WebP 並上傳到 GitHub（media/ 資料夾），再更新網址。確定開始？" : "Convert all legacy Firebase Storage URLs and embedded base64 images to WebP and upload to GitHub (media/). Start?")) return;
+    setMigBusy(true); setMigProg({ scanned: 0, moved: 0, failed: 0, corsFailed: 0 });
+    setMsg({ ok: true, t: lang === "zh" ? "搬移並轉檔為 WebP 中，請保持頁面開啟…" : "Converting to WebP & migrating to GitHub, keep this page open…" });
     try {
-      const r = await window.STORE.migrateImagesToStorage((p) => setMigProg({ ...p }));
-      setMsg({ ok: true, t: lang === "zh" ?
-        `已遷移 ${r.moved}/${r.scanned} 張圖片到雲端 Storage${r.failed ? `（${r.failed} 張失敗，將保留原內嵌圖）` : ""}。主資料已縮小並重新同步。` :
-        `Moved ${r.moved}/${r.scanned} images to Storage${r.failed ? ` (${r.failed} failed, kept inline)` : ""}. Master data shrunk and re-synced.` });
+      const r = await window.STORE.migrateImagesToGitHub((p) => setMigProg({ ...p }));
+      if (r.scanned === 0) {
+        setMsg({ ok: true, t: lang === "zh" ? "沒有需要搬移的照片（所有官方圖皆已在 GitHub 或本機相對路徑）。" : "No images need migration (all catalog images are already on GitHub or local paths)." });
+      } else {
+        const corsHint = r.corsFailed
+          ? (lang === "zh" ? `；其中 ${r.corsFailed} 張 Firebase Storage 舊圖受限於瀏覽器 CORS 無法直接讀取，若需自動抓取請於 Firebase Storage 設定 CORS 或手動匯出。` : `; ${r.corsFailed} Firebase Storage image(s) blocked by bucket CORS.`)
+          : "";
+        setMsg({ ok: r.failed === 0, t: lang === "zh" ?
+          `已搬移 ${r.moved}/${r.scanned} 張圖片至 GitHub（WebP 格式）${r.failed ? `（${r.failed} 張失敗，已保留原圖）` : ""}${corsHint}` :
+          `Migrated ${r.moved}/${r.scanned} images to GitHub as WebP${r.failed ? ` (${r.failed} failed, kept original)` : ""}${corsHint}` });
+      }
     } catch (e) {
-      setMsg({ ok: false, t: (lang === "zh" ? "遷移失敗：" : "Migration failed: ") + (e && e.message || e) });
+      setMsg({ ok: false, t: (lang === "zh" ? "搬移失敗：" : "Migration failed: ") + (e && e.message || e) });
     }
     setMigBusy(false);
   }
@@ -608,9 +640,36 @@ function BackupPanel({ lang }) {
     setTimeout(() => URL.revokeObjectURL(url), 1500);
     setMsg({ ok: true, t: lang === "zh" ? `已將 ${files.length} 張照片打包為 uploads.zip，解壓縮後放入專案的 uploads/ 子目錄即可。` : `Packed ${files.length} photos into uploads.zip — unzip into your project's uploads/ folder.` });
   }
+  const ghReady = !!(ghCfg.owner && ghCfg.repo && ghCfg.branch && ghCfg.token);
   return (
     <div className="backup">
       <CloudPanel lang={lang} />
+      <div className="bk-card">
+        <div className="bk-icon"><Icon name="image" size={22} /></div>
+        <div className="bk-main">
+          <h3 className="bk-h">{lang === "zh" ? "GitHub 免費圖床與照片搬移（全 WebP）" : "GitHub image hosting & migration (WebP)"}</h3>
+          <p className="bk-p">{lang === "zh" ?
+            "已全面停用 Firebase Storage（$0 費用），所有上傳圖片一律自動轉成 WebP。管理員可填入只授權此倉庫「Contents: Read and write」的 Fine-grained Token（僅存在本機瀏覽器，絕不上傳雲端），即可將官方圖片直接存進 GitHub 並一鍵把舊圖搬回 GitHub。" :
+            "Firebase Storage is disabled ($0 Storage cost) and all uploads convert to WebP automatically. Enter a Fine-grained GitHub Token with Contents: Read & Write (stored locally in this browser only) to host catalog images in GitHub and migrate legacy images."}</p>
+          <div className="ed-grid" style={{ marginBottom: 10 }}>
+            <Field label={lang === "zh" ? "GitHub 帳號" : "Owner"}><input className="inp mono" value={ghCfg.owner} onChange={(e) => setGhCfg({ ...ghCfg, owner: e.target.value })} placeholder="pc007ya" /></Field>
+            <Field label={lang === "zh" ? "倉庫名稱" : "Repository"}><input className="inp mono" value={ghCfg.repo} onChange={(e) => setGhCfg({ ...ghCfg, repo: e.target.value })} placeholder="GIANTbike" /></Field>
+            <Field label={lang === "zh" ? "分支" : "Branch"}><input className="inp mono" value={ghCfg.branch} onChange={(e) => setGhCfg({ ...ghCfg, branch: e.target.value })} placeholder="main" /></Field>
+            <Field label={lang === "zh" ? "存放資料夾" : "Folder"}><input className="inp mono" value={ghCfg.dir} onChange={(e) => setGhCfg({ ...ghCfg, dir: e.target.value })} placeholder="media" /></Field>
+          </div>
+          <Field label={lang === "zh" ? "GitHub Fine-grained Token（僅存於本機瀏覽器）" : "GitHub Fine-grained Token (local browser only)"}>
+            <input className="inp mono" type="password" value={ghCfg.token} onChange={(e) => setGhCfg({ ...ghCfg, token: e.target.value })} placeholder="github_pat_…" autoComplete="off" />
+          </Field>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12, alignItems: "center" }}>
+            <button className="btn sm" onClick={saveGhCfg}><Icon name="check" size={14} />{lang === "zh" ? "儲存設定" : "Save settings"}</button>
+            <button className="btn ghost sm" onClick={testGh} disabled={ghBusy || !ghReady}><Icon name="cloud" size={14} />{ghBusy ? (lang === "zh" ? "測試中…" : "Testing…") : (lang === "zh" ? "測試連線" : "Test connection")}</button>
+            <button className="btn sm" onClick={migrate} disabled={migBusy || !ghReady}><Icon name="upload" size={14} />{migBusy ? (lang === "zh" ? "搬移中…" : "Migrating…") : (lang === "zh" ? "一鍵搬移舊圖到 GitHub (WebP)" : "Migrate images to GitHub (WebP)")}</button>
+            {ghCfg.token && <button className="btn ghost sm" onClick={clearGhToken}>{lang === "zh" ? "清除 Token" : "Clear token"}</button>}
+            {migBusy && migProg && <span className="bk-p mono" style={{ margin: 0 }}>{lang === "zh" ? "已處理" : "done"} {migProg.moved}/{migProg.scanned}{migProg.failed ? " · " + (lang === "zh" ? "失敗" : "failed") + " " + migProg.failed : ""}</span>}
+          </div>
+        </div>
+      </div>
+      {msg && <div className={"bk-msg" + (msg.ok ? " ok" : " bad")}><Icon name={msg.ok ? "check" : "x"} size={15} />{msg.t}</div>}
       <div className="bk-card">
         <div className="bk-icon"><Icon name="download" size={22} /></div>
         <div className="bk-main">
@@ -632,33 +691,23 @@ function BackupPanel({ lang }) {
         <div className="bk-icon"><Icon name="image" size={22} /></div>
         <div className="bk-main">
           <h3 className="bk-h">{lang === "zh" ? "匯出照片到 uploads/" : "Export photos to uploads/"}</h3>
-          <p className="bk-p">{lang === "zh" ? "將上傳的示意圖、步驟圖、制具圖打包成 zip，檔名依測試項目命名（如 B-04_step01.png）；解壓縮後放入 uploads/ 子目錄。" : "Pack uploaded schematics, step photos and fixture images into a zip named by test item (e.g. B-04_step01.png); unzip into uploads/."}</p>
+          <p className="bk-p">{lang === "zh" ? "將內嵌的示意圖、步驟圖、制具圖打包成 zip，檔名依測試項目命名（如 B-04_step01.webp）；解壓縮後放入專案即可。" : "Pack embedded schematics, step photos and fixture images into a zip named by test item (e.g. B-04_step01.webp)."}</p>
           <button className="btn" onClick={exportPhotos}><Icon name="image" size={16} />{lang === "zh" ? "匯出照片 (uploads.zip)" : "Export photos (zip)"}</button>
         </div>
       </div>
-      {msg && <div className={"bk-msg" + (msg.ok ? " ok" : " bad")}><Icon name={msg.ok ? "check" : "x"} size={15} />{msg.t}</div>}
       <div className="bk-card">
         <div className="bk-icon"><Icon name="image" size={22} /></div>
         <div className="bk-main">
-          <h3 className="bk-h">{lang === "zh" ? "壓縮圖片以節省空間" : "Compress images to free space"}</h3>
-          <p className="bk-p">{lang === "zh" ? "雲端同步將所有資料存成單一文件，上限 1 MB。若上傳示意圖後出現「空間不足」，按此可將所有已上傳圖片重新壓縮（縮小尺寸、轉 JPEG），不影響文字內容。" : "Cloud sync stores all data in one document capped at 1 MB. If uploading a schematic hits a size error, this re-compresses every uploaded image (downscale + JPEG) without touching text content."}</p>
-          <button className="btn" onClick={compact} disabled={busy}><Icon name="image" size={16} />{busy ? lang === "zh" ? "壓縮中…" : "Compressing…" : lang === "zh" ? "壓縮現有圖片" : "Compress existing images"}</button>
-        </div>
-      </div>
-      <div className="bk-card">
-        <div className="bk-icon"><Icon name="cloud" size={22} /></div>
-        <div className="bk-main">
-          <h3 className="bk-h">{lang === "zh" ? "遷移舊圖到雲端 Storage" : "Migrate old images to Cloud Storage"}</h3>
-          <p className="bk-p">{lang === "zh" ? "一次性作業：把過去內嵌在資料裡的 base64 舊圖全部上傳到 Firebase Storage，改存為短網址。主資料文件會大幅縮小、徹底擺脫 1 MB 限制。需先在 Firebase 啟用 Storage 並以管理員登入。可重複執行（已是網址者自動略過）。" : "One-time: upload every base64 image embedded in the data to Firebase Storage and replace with short URLs. Shrinks the master document and removes the 1 MB ceiling. Requires Storage enabled and admin sign-in. Safe to re-run (URLs are skipped)."}</p>
-          <button className="btn" onClick={migrate} disabled={migBusy}><Icon name="cloud" size={16} />{migBusy ? (lang === "zh" ? "遷移中…" : "Migrating…") : (lang === "zh" ? "遷移舊圖到雲端" : "Migrate images to Storage")}</button>
-          {migBusy && migProg && <span className="bk-p mono" style={{ marginLeft: 12 }}>{lang === "zh" ? "已處理" : "done"} {migProg.moved}/{migProg.scanned}{migProg.failed ? " · " + (lang === "zh" ? "失敗" : "failed") + " " + migProg.failed : ""}</span>}
+          <h3 className="bk-h">{lang === "zh" ? "壓縮圖片以節省空間 (WebP)" : "Compress images to WebP"}</h3>
+          <p className="bk-p">{lang === "zh" ? "將目前內嵌在資料中的圖片全部重新壓縮並轉換為 WebP，大幅縮小資料體積，不影響文字內容。" : "Re-compress all embedded images into WebP to shrink dataset size without touching text content."}</p>
+          <button className="btn" onClick={compact} disabled={busy}><Icon name="image" size={16} />{busy ? lang === "zh" ? "壓縮中…" : "Compressing…" : lang === "zh" ? "壓縮現有圖片為 WebP" : "Compress images to WebP"}</button>
         </div>
       </div>
       <div className="bk-note">
         <Icon name="cloud" size={15} />
         <span>{lang === "zh" ?
-          "雲端共用：此示範以本機儲存為主。要做即時 Google 雲端同步需搭配後端服務（如 Google Drive API / Firebase）；在此之前，以上備份檔放於共用雲端硬碟即可在團隊間傳遞同一份資料。" :
-          "Cloud sharing: this demo is local-first. Live Google Drive sync needs a backend (Drive API / Firebase). Until then, share the backup file via a shared Drive to pass the same dataset across the team."}</span>
+          "零費用架構：Firebase 只使用 Firestore 與 Google 登入（免費額度內）；圖片全面採用 WebP，管理員官方圖存 GitHub，供應商照片以精簡 WebP 存於 Firestore。" :
+          "Zero-storage-cost architecture: Firebase is used only for Auth + Firestore; all uploads encode to WebP, with admin media hosted in GitHub and compact vendor photos stored inline in Firestore."}</span>
       </div>
     </div>);
 

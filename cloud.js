@@ -96,16 +96,14 @@ async function signInAdmin() {
     const appMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js");
     const authMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js");
     const fsMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
-    let stMod = null;
-    try { stMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js"); } catch (e) { stMod = null; }
-
     const app = appMod.initializeApp(cfg);
     const auth = authMod.getAuth(app);
     const db = fsMod.getFirestore(app);
-    _api = { app, auth, db, authMod, fsMod, stMod };
-    // Expose a Storage handle for storage.js (bffUploadImage). Absent =>
-    // uploads fall back to inline data-URIs (offline / storage unavailable).
-    if (stMod) { try { CLOUD.storage = stMod.getStorage(app); CLOUD.stMod = stMod; } catch (e) { CLOUD.storage = null; } }
+    _api = { app, auth, db, authMod, fsMod };
+    // Firebase Storage is intentionally disabled to avoid Storage billing;
+    // image hosting is handled by storage.js (GitHub repo WebP or inline WebP data-URI).
+    CLOUD.storage = null;
+    CLOUD.stMod = null;
 
     const provider = new authMod.GoogleAuthProvider();
     _signInImpl = () => authMod.signInWithPopup(auth, provider).catch((e) => setStatus("error", e.message));

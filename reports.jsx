@@ -136,8 +136,8 @@ function ReportPanel({ item, lang, t, vendor, admin, onZoom }) {
     let failed = 0;
     for (const f of files.slice(0, room)) {
       try {
-        const path = "vendors/" + (vid || "anon") + "/reports/" + item.id + "_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7) + ".jpg";
-        next.push(await window.bffUploadImage(f, 1280, 0.7, path));
+        const path = "vendors/" + (vid || "anon") + "/reports/" + item.id + "_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7) + ".webp";
+        next.push(await window.bffUploadImage(f, 1000, 0.72, path, 140 * 1024));
       }
       catch (e) { failed++; }
     }

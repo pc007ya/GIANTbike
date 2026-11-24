@@ -1,3 +1,3 @@
-# Canyon_BikeTest
+# GIANTbike
 
-https://pc007ya.github.io/Canyon_BikeTest/
+https://pc007ya.github.io/GIANTbike/

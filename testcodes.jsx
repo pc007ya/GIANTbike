@@ -251,8 +251,8 @@ function TestcodeEditor({ tcId, lang, onClose }) {
   }
   function loadPhoto(key, file) {
     if (!file || !file.type.startsWith("image/")) return;
-    const path = "catalog/testcodes/" + (id || "code") + "_" + key + ".jpg";
-    window.bffUploadImage(file, 1100, 0.72, path).then(function (src) {setD(function (p) {const n = { ...p };n[key] = src;return n;});setErr("");}).
+    const path = "catalog/testcodes/" + (id || "code") + "_" + key + ".webp";
+    window.bffUploadImage(file, 1100, 0.78, path).then(function (src) {setD(function (p) {const n = { ...p };n[key] = src;return n;});setErr("");}).
     catch(function () {setErr(zh ? "上傳失敗（檔案不是圖片，或超過 20MB）" : "Upload failed (not an image, or over 20MB)");});
   }
   function toggleItem(itemId) {
