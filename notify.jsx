@@ -35,7 +35,7 @@ function notifCollect(lang) {
   const out = [];
   vendors.forEach((v) => {
     let map = {};
-    try { map = JSON.parse(localStorage.getItem("bff:stock:" + v.id) || "{}"); } catch (e) {}
+    map = window.AUTH.stockOf(v.id);
     Object.keys(map).forEach((key) => {
       const e = map[key];
       if (!e || !e.at) return;

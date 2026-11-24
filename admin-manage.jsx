@@ -246,8 +246,7 @@ function VendorRow({ v, lang, onSave, onDelete, startEdit }) {
   mEffect(() => setDraft(v), [v]);
   const L = (o) => o && o[lang] != null ? o[lang] : o;
   function doSave() {
-    const id = window.STORE.slugId(draft.id, v.id);
-    onSave({ ...draft, id }, v.id);
+    onSave({id:v.id,name:draft.name},v.id);
     setEdit(false);
   }
   if (!edit) {
@@ -255,9 +254,7 @@ function VendorRow({ v, lang, onSave, onDelete, startEdit }) {
       <div className="vrow">
         <span className="vrow-ava">{(L(v.name) || "?").trim().charAt(0)}</span>
         <span className="vrow-main"><span className="vrow-name">{L(v.name) || <em className="muted">{lang === "zh" ? "（未命名）" : "(unnamed)"}</em>}</span><span className="vrow-id mono">{v.id}</span></span>
-        <span className="vrow-code mono">{lang === "zh" ? "存取碼" : "Code"} {v.code}</span>
         <button className="icobtn" onClick={() => {setDraft(v);setEdit(true);}} aria-label="edit"><Icon name="pencil" size={15} /></button>
-        <button className="delrow" onClick={() => onDelete(v)} aria-label="delete"><Icon name="trash" size={15} /></button>
       </div>);
 
   }
@@ -266,8 +263,6 @@ function VendorRow({ v, lang, onSave, onDelete, startEdit }) {
       <div className="vrow-inputs">
         <input className="inp" placeholder={lang === "zh" ? "公司名稱（中）" : "Name (zh)"} value={draft.name.zh} onChange={(e) => setDraft({ ...draft, name: { ...draft.name, zh: e.target.value } })} />
         <input className="inp" placeholder={lang === "zh" ? "公司名稱（EN）" : "Name (en)"} value={draft.name.en} onChange={(e) => setDraft({ ...draft, name: { ...draft.name, en: e.target.value } })} />
-        <input className="inp mono vrow-idin" placeholder={lang === "zh" ? "代號（英數）" : "ID (a-z0-9)"} value={draft.id} onChange={(e) => setDraft({ ...draft, id: e.target.value })} />
-        <input className="inp mono vrow-codein" placeholder={lang === "zh" ? "存取碼" : "Code"} value={draft.code} onChange={(e) => setDraft({ ...draft, code: e.target.value })} />
       </div>
       <button className="btn sm" onClick={doSave}><Icon name="check" size={14} />{lang === "zh" ? "儲存" : "Save"}</button>
       <button className="btn ghost sm" onClick={() => setEdit(false)}>{lang === "zh" ? "取消" : "Cancel"}</button>
@@ -276,48 +271,49 @@ function VendorRow({ v, lang, onSave, onDelete, startEdit }) {
 }
 
 /* ---------- Part (fixture library) editor modal ---------- */
-function AdminCodeCard({ lang }) {
-  const [code, setCode] = mState(() => window.STORE.admincode_get());
-  const [editing, setEditing] = mState(false);
-  const [val, setVal] = mState("");
-  const [msg, setMsg] = mState("");
-  function start() {setVal("");setMsg("");setEditing(true);}
-  async function save() {
-    const c = val.trim();
-    if (!c) {setMsg(lang === "zh" ? "請輸入新存取碼" : "Enter a new code");return;}
-    await window.STORE.admincode_set(c);
-    setCode(window.STORE.admincode_get());
-    setEditing(false);
-    setMsg("");
+function SupplierAccountAdminCard({lang}) {
+  const zh=lang==="zh";
+  const [state,setState]=mState("");
+  const [busy,setBusy]=mState(false);
+  const [uid,setUid]=mState(""), [email,setEmail]=mState(""), [vendorId,setVendor]=mState("");
+  const [record,setRecord]=mState(null);
+  const uiBusy=busy||!window.CLOUD?.readyForWrites;
+  const catalog=window.AUTH.VENDORS;
+  const pair={uid:uid.trim(),email:email.trim()};
+  async function make(fn,ok) {
+    if(uiBusy)return;
+    setBusy(true);setState("");
+    try{const found=await fn();if(ok)setState(ok);return found;}
+    catch(e){
+      if(e.code==="bff/registry-exists")setState(zh?"此 UID 已有登記，不能覆寫或重新分派。":"This UID is already registered and cannot be replaced or reassigned.");
+      else setState(zh?"操作未確認，請檢查 UID、公司信箱、廠商與雲端連線。":"Not confirmed. Check UID, company email, vendor, and connection.");
+    } finally{setBusy(false);}
   }
-  return (
-    <div className="admincode-card">
-      <div className="admincode-main">
-        <span className="admincode-ico"><Icon name="shield" size={16} /></span>
-        <div className="admincode-txt">
-          <span className="admincode-k">{lang === "zh" ? "管理員存取碼" : "Admin access code"}</span>
-          <span className="admincode-hint">{lang === "zh" ? "管理員登入系統所用的密碼，變更後即時同步至雲端。" : "Password for admin sign-in; syncs to the cloud when changed."}</span>
-        </div>
-        {!editing &&
-        <React.Fragment>
-            <span className="admincode-val mono">{"••••••••"}</span>
-            <button className="btn sm" onClick={start}><Icon name="pencil" size={14} />{lang === "zh" ? "變更" : "Change"}</button>
-          </React.Fragment>
-        }
-      </div>
-      {editing &&
-      <div className="admincode-edit">
-          <input className="inp mono" type="text" autoFocus value={val}
-        placeholder={lang === "zh" ? "輸入新的管理員存取碼" : "New admin code"}
-        onChange={(e) => {setVal(e.target.value);setMsg("");}}
-        onKeyDown={(e) => {if (e.key === "Enter") save();}} />
-          <button className="btn sm" onClick={save}><Icon name="check" size={14} />{lang === "zh" ? "儲存" : "Save"}</button>
-          <button className="btn ghost sm" onClick={() => setEditing(false)}>{lang === "zh" ? "取消" : "Cancel"}</button>
-        </div>
-      }
-      {msg && <div className="login-err" style={{ marginTop: 8 }}><Icon name="x" size={13} />{msg}</div>}
-    </div>);
-
+  async function stop(){
+    if(!record||record.uid!==pair.uid||!record.enabled)return;
+    if(!window.confirm(zh?"停用這個人的供應商權限？原資料不會刪除。":"Disable this person's supplier access? Existing records are preserved."))return;
+    const ok=await make(async()=>{await window.CLOUD.disableSupplier(pair.uid);return true;},zh?"已停用供應商權限。":"Supplier access disabled.");
+    if(ok)setRecord({...record,enabled:false});
+  }
+  return <div className="admincode-card">
+    <h3>{zh?"供應商個人帳號":"Supplier accounts"}</h3>
+    <p>{zh?"先在 Firebase 控制台以公司信箱開戶，再把同一帳號的 UID、信箱及公司登記在這裡。此頁不存密碼、不寄開戶信。":"Create the company email account in Firebase Console first, then register that account's exact UID, email, and company here. No passwords or invite emails are handled here."}</p>
+    <a className="btn ghost sm" href="ops/account-guide.html" target="_blank" rel="noopener">{zh?"開戶與停用指引":"Account administration guide"}</a>{" "}
+    <button className="btn sm" disabled={uiBusy} onClick={()=>make(()=>window.CLOUD.publishSupplierViews(),zh?"已確認發布供應商目錄與專案。":"Supplier catalog and assignments published.")}>{zh?"發布供應商目錄與專案":"Publish the supplier catalog and projects"}</button>
+    <label htmlFor="supplier-uid">Firebase UID</label>
+    <input id="supplier-uid" className="inp mono" value={uid} onChange={e=>{setUid(e.target.value);setRecord(null);}} autoComplete="off"/>
+    <label htmlFor="supplier-email">{zh?"公司信箱":"Company email"}</label>
+    <input id="supplier-email" className="inp" type="email" value={email} onChange={e=>setEmail(e.target.value)} autoComplete="off"/>
+    <label htmlFor="supplier-company">{zh?"供應商":"Vendor"}</label>
+    <select id="supplier-company" className="inp" value={vendorId} onChange={e=>setVendor(e.target.value)}>
+      <option value="">{zh?"請選擇":"Select a company"}</option>
+      {catalog.map(v=><option key={v.id} value={v.id}>{L2(v.name,lang)} ({v.id})</option>)}
+    </select>
+    <button className="btn sm" disabled={uiBusy||!pair.uid||!pair.email||!vendorId} onClick={()=>make(()=>window.CLOUD.registerSupplier(pair.uid,pair.email,vendorId),zh?"已登記個人帳號，承辦人可自設密碼並驗證信箱。":"Registered. The supplier can now set a password and verify their email.")}>{zh?"登記權限":"Register access"}</button>{" "}
+    <button className="btn ghost sm" disabled={uiBusy||!pair.uid} onClick={async()=>{const p=await make(()=>window.CLOUD.lookupSupplier(pair.uid));setRecord(p?{uid:pair.uid,...p}:null);if(p===null)setState(zh?"未登記。":"Not registered.");}}>{zh?"查詢此帳號":"Look up this account"}</button>{" "}
+    {record&&<p>{record.email} · {record.vendorId} · {record.enabled?(zh?"啟用":"Enabled"):(zh?"停用":"Disabled")}{" "}<button className="btn ghost sm" disabled={uiBusy||!record.enabled} onClick={stop}>{zh?"停用權限":"Disable access"}</button></p>}
+    {state&&<p role="status">{state}</p>}
+  </div>;
 }
 
 /* ---------- Part (fixture library) editor modal ---------- */
@@ -490,8 +486,8 @@ function CloudPanel({ lang }) {
           {cloud.status === "error" && <div className="bk-msg bad"><Icon name="x" size={15} />{cloud.message}</div>}
           {cloud.user ?
         <div className="cloud-user">
-              <span className="cloud-ava">{cloud.user.photo ? <img src={cloud.user.photo} alt="" /> : (cloud.user.name || cloud.user.email || "?").charAt(0)}</span>
-              <span className="cloud-uinfo"><span className="cloud-uname">{cloud.user.name || cloud.user.email}</span><span className="cloud-uemail mono">{cloud.user.email}</span></span>
+              <span className="cloud-ava">{cloud.user.photo ? <img src={cloud.user.photo} alt="" /> : (cloud.user.email || "?").charAt(0)}</span>
+              <span className="cloud-uinfo"><span className="cloud-uname">{cloud.user.email}</span><span className="cloud-uemail mono">{cloud.user.email}</span></span>
               <button className="btn ghost sm" onClick={() => window.CLOUD.signOutCloud()}>{lang === "zh" ? "登出 Google" : "Sign out"}</button>
             </div> :
 
@@ -500,7 +496,7 @@ function CloudPanel({ lang }) {
             </button>
         }
           <p className="bk-note-inline">{lang === "zh" ? "登入後，所有測試項目、制具庫、供應商與盤點將即時同步到雲端，團隊各機共用同一份資料。" : "Once signed in, all data syncs live to the cloud so the whole team shares one dataset."}</p>
-          <button className="link-btn" onClick={() => {if (window.confirm(lang === "zh" ? "停用雲端並改回本機模式？" : "Disable cloud and return to local mode?")) window.CLOUD.disableCloud();}}>{lang === "zh" ? "停用雲端同步" : "Disable cloud sync"}</button>
+
         </div>
       }
     </div>);
@@ -553,45 +549,6 @@ function BackupPanel({ lang }) {
     setGhCfg(window.GH_STORAGE.clearToken());
     setMsg({ ok: true, t: lang === "zh" ? "已清除本機 GitHub Token（改為內嵌 WebP 模式）。" : "Cleared local GitHub token (switched to inline WebP mode)." });
   }
-  const [shCfg, setShCfg] = mState(() => (window.SHEETS ? window.SHEETS.getConfig() : { enabled: false, url: "", secret: "", sheetUrl: "" }));
-  const [shBusy, setShBusy] = mState(false);
-  function saveShCfg() {
-    if (!window.SHEETS) return;
-    const next = Object.assign({}, shCfg, { enabled: !!(shCfg.url && shCfg.url.trim()) ? shCfg.enabled : false });
-    const saved = window.SHEETS.setConfig(next);
-    setShCfg(saved);
-    setMsg({ ok: true, t: lang === "zh"
-      ? (saved.enabled ? "已儲存並啟用 Google 試算表自動同步（已同步至雲端，所有供應商即刻生效）。" : "已儲存 Google 試算表設定（目前為停用狀態）。")
-      : (saved.enabled ? "Saved & enabled Google Sheets auto-sync (synced to all vendors)." : "Saved Google Sheets settings (disabled).") });
-  }
-  async function testSh() {
-    if (!window.SHEETS) return;
-    if (!shCfg.url || !/^https:\/\//i.test(shCfg.url.trim())) {
-      setMsg({ ok: false, t: lang === "zh" ? "請先貼上以 https:// 開頭的 Apps Script 網頁應用程式網址。" : "Enter a valid https:// Apps Script Web App URL first." });
-      return;
-    }
-    setShBusy(true);
-    try {
-      const r = await window.SHEETS.testConnection(shCfg);
-      setMsg({ ok: true, t: lang === "zh"
-        ? `Google 試算表連線成功！已連上「${r.spreadsheet || "試算表"}」（工作表：${(r.sheets || []).join("、")}）。記得勾選啟用並按儲存。`
-        : `Connected to Google Sheet "${r.spreadsheet || "Sheet"}" (tabs: ${(r.sheets || []).join(", ")}).` });
-    } catch (e) {
-      setMsg({ ok: false, t: (lang === "zh" ? "試算表連線失敗（請確認 Apps Script 部署權限為「所有人」）：" : "Sheets test failed: ") + (e && e.message || e) });
-    }
-    setShBusy(false);
-  }
-  async function copyScript() {
-    try {
-      const resp = await fetch("google-apps-script/Code.gs");
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
-      const txt = await resp.text();
-      await navigator.clipboard.writeText(txt);
-      setMsg({ ok: true, t: lang === "zh" ? "已複製 Apps Script 程式碼！請到 Google 試算表 → 擴充功能 → Apps Script 貼上並部署為網頁應用程式。" : "Copied Apps Script code! Paste into Google Sheets → Extensions → Apps Script and deploy as Web App." });
-    } catch (e) {
-      setMsg({ ok: false, t: lang === "zh" ? "無法自動複製，請直接開啟專案內的 google-apps-script/Code.gs 複製。" : "Could not copy automatically; open google-apps-script/Code.gs directly." });
-    }
-  }
   async function migrate() {
     if (!window.bffStorageAvailable || !window.bffStorageAvailable()) {
       setMsg({ ok: false, t: lang === "zh" ? "請先在上方填入 GitHub Fine-grained Token 並點「儲存設定」，即可開始將照片搬移到 GitHub。" : "Save your GitHub Fine-grained Token above first to migrate images to GitHub." });
@@ -633,9 +590,9 @@ function BackupPanel({ lang }) {
     r.onload = () => {
       try {
         const snap = JSON.parse(r.result);
-        if (!window.confirm(lang === "zh" ? "還原將覆蓋目前所有資料，確定繼續？" : "Restore will overwrite all current data. Continue?")) return;
+        if (!window.confirm(lang === "zh" ? "還原將覆蓋管理主資料（不會覆寫任何供應商盤點／報告），確定繼續？" : "Restore will replace the admin catalog (not vendor stock or reports). Continue?")) return;
         window.STORE.importSnapshot(snap);
-        setMsg({ ok: true, t: lang === "zh" ? "已從備份檔還原全部資料。" : "All data restored from backup." });
+        setMsg({ ok: true, t: lang === "zh" ? "已讀取管理主資料備份；供應商盤點與報告未覆寫。" : "Admin catalog backup loaded; vendor stock and reports were not overwritten." });
       } catch (e) {
         setMsg({ ok: false, t: (lang === "zh" ? "還原失敗：" : "Restore failed: ") + e.message });
       }
@@ -709,33 +666,9 @@ function BackupPanel({ lang }) {
         </div>
       </div>
       <div className="bk-card">
-        <div className="bk-icon"><Icon name="file" size={22} /></div>
         <div className="bk-main">
-          <h3 className="bk-h">{lang === "zh" ? "Google 試算表自動連動（盤點總表 / 測試報告 / 異常申請）" : "Google Sheets auto-sync (Stock / Reports / Anomalies)"}</h3>
-          <p className="bk-p">{lang === "zh" ?
-            "供應商送出庫存盤點、測試報告或異常申請時，背景自動寫入 Google 試算表對應分頁。貼上 Apps Script 網頁應用程式網址並儲存後，全體供應商立即生效。" :
-            "Automatically appends vendor stock-takes, test reports, and anomaly requests to your Google Sheet tabs. Once saved, syncs to all vendors via cloud."}</p>
-          <Field label={lang === "zh" ? "Apps Script 網頁應用程式網址（Web App URL）" : "Apps Script Web App URL"}>
-            <input className="inp mono" value={shCfg.url} onChange={(e) => setShCfg({ ...shCfg, url: e.target.value })} placeholder="https://script.google.com/macros/s/…/exec" />
-          </Field>
-          <div className="ed-grid" style={{ marginTop: 10 }}>
-            <Field label={lang === "zh" ? "Google 試算表檢視網址（方便後台快速開啟）" : "Google Sheet URL (quick link)"}>
-              <input className="inp mono" value={shCfg.sheetUrl} onChange={(e) => setShCfg({ ...shCfg, sheetUrl: e.target.value })} placeholder="https://docs.google.com/spreadsheets/d/…" />
-            </Field>
-            <Field label={lang === "zh" ? "自訂密鑰（選填，須與 Apps Script 一致）" : "Shared secret (optional)"}>
-              <input className="inp mono" type="password" value={shCfg.secret} onChange={(e) => setShCfg({ ...shCfg, secret: e.target.value })} placeholder={lang === "zh" ? "留空代表不檢查" : "Leave blank if unused"} autoComplete="off" />
-            </Field>
-          </div>
-          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: 10, fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>
-            <input type="checkbox" checked={!!shCfg.enabled} onChange={(e) => setShCfg({ ...shCfg, enabled: e.target.checked })} />
-            <span>{lang === "zh" ? "啟用自動同步到 Google 試算表" : "Enable automatic sync to Google Sheets"}</span>
-          </label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12, alignItems: "center" }}>
-            <button className="btn sm" onClick={saveShCfg}><Icon name="check" size={14} />{lang === "zh" ? "儲存設定" : "Save settings"}</button>
-            <button className="btn ghost sm" onClick={testSh} disabled={shBusy || !shCfg.url}><Icon name="cloud" size={14} />{shBusy ? (lang === "zh" ? "測試中…" : "Testing…") : (lang === "zh" ? "測試連線" : "Test connection")}</button>
-            <button className="btn ghost sm" onClick={copyScript}><Icon name="file" size={14} />{lang === "zh" ? "複製 Apps Script 程式碼" : "Copy Apps Script code"}</button>
-            {shCfg.sheetUrl && <a className="btn ghost sm" href={shCfg.sheetUrl} target="_blank" rel="noopener" style={{ textDecoration: "none" }}><Icon name="file" size={14} />{lang === "zh" ? "開啟試算表" : "Open Sheet"}</a>}
-          </div>
+          <h3 className="bk-h">{lang==="zh"?"Google 試算表同步已暫停":"Google Sheets sync paused"}</h3>
+          <p className="bk-p">{lang==="zh"?"盤點、報告與異常申請儲存在驗證過身分的資料庫。不再從供應商瀏覽器直接寫試算表；既有試算表資料未刪除。":"Verified users' records remain in Firestore. Direct browser writes to Sheets are disabled; past spreadsheet records were not deleted."}</p>
         </div>
       </div>
       {msg && <div className={"bk-msg" + (msg.ok ? " ok" : " bad")}><Icon name={msg.ok ? "check" : "x"} size={15} />{msg.t}</div>}
@@ -751,7 +684,7 @@ function BackupPanel({ lang }) {
         <div className="bk-icon"><Icon name="upload" size={22} /></div>
         <div className="bk-main">
           <h3 className="bk-h">{lang === "zh" ? "還原備份" : "Restore backup"}</h3>
-          <p className="bk-p">{lang === "zh" ? "從備份 JSON 還原全部資料（會覆蓋目前內容）。可在另一台機器匯入以同步。" : "Restore everything from a backup JSON (overwrites current data). Import on another machine to sync."}</p>
+          <p className="bk-p">{lang === "zh" ? "從備份 JSON 還原管理主資料。此功能不會覆寫供應商盤點、報告及照片。" : "Restore the admin catalog from JSON without overwriting vendor stock, reports or images."}</p>
           <label className="btn ghost"><Icon name="upload" size={16} />{lang === "zh" ? "選擇備份檔還原" : "Choose file to restore"}
             <input type="file" accept="application/json,.json" hidden onChange={(e) => importFile(e.target.files[0])} /></label>
         </div>
@@ -775,8 +708,8 @@ function BackupPanel({ lang }) {
       <div className="bk-note">
         <Icon name="cloud" size={15} />
         <span>{lang === "zh" ?
-          "零費用架構：Firebase 只使用 Firestore 與 Google 登入（免費額度內）；圖片全面採用 WebP，管理員官方圖存 GitHub，供應商照片以精簡 WebP 存於 Firestore。" :
-          "Zero-storage-cost architecture: Firebase is used only for Auth + Firestore; all uploads encode to WebP, with admin media hosted in GitHub and compact vendor photos stored inline in Firestore."}</span>
+          "公開圖檔仍由 GitHub 提供。Firebase 僅用於帳號與私有資料；私人資料會驗證一份供應商授權，Google 登入再查一份綁定紀錄；實際費用視用量而定。" :
+          "Public media remains on GitHub. Firebase is used for identity and private records. Private operations check a membership record; Google sessions also check a binding. Actual cost depends on usage."}</span>
       </div>
     </div>);
 
@@ -807,12 +740,8 @@ function AdminManage({ lang, t, onEdit }) {
   }
   function addVendor() {
     const id = window.STORE.nextVendorId();
-    window.STORE.vendors_save({ id, name: { zh: "", en: "" }, code: "1234" });
+    window.STORE.vendors_save({id,name:{zh:id,en:id}});
     setJustAdded(id);
-  }
-  function delVendor(v) {
-    if (!window.confirm(lang === "zh" ? `確定刪除供應商「${L(v.name)}」？其盤點資料將一併移除。` : `Delete vendor "${L(v.name)}"? Their stock-take will be removed.`)) return;
-    window.STORE.vendors_delete(v.id);
   }
   function delPart(p) {
     if (!window.confirm(lang === "zh" ? `確定刪除制具「${L(p.name)}」？使用到的測試將同步移除此制具。` : `Delete fixture "${L(p.name)}"? It will be removed from tests that use it.`)) return;
@@ -874,15 +803,15 @@ function AdminManage({ lang, t, onEdit }) {
               <span className="result-count"><strong>{vendors.length}</strong> {lang === "zh" ? "家供應商" : "vendors"}</span>
               <button className="btn" onClick={addVendor}><Icon name="plus" size={16} />{lang === "zh" ? "新增供應商" : "Add vendor"}</button>
             </div>
-            <AdminCodeCard lang={lang} />
+            <SupplierAccountAdminCard lang={lang} />
             <div className="vlist">
               {vendors.map((v) =>
             <VendorRow key={v.id} v={v} lang={lang} startEdit={v.id === justAdded}
             onSave={(nv, oldId) => {window.STORE.vendors_save(nv, oldId);setJustAdded(null);}}
-            onDelete={delVendor} />
+            />
             )}
             </div>
-            <p className="se-foot">{lang === "zh" ? "供應商以此名單登入；刪除後其帳號與盤點資料一併移除。" : "Vendors sign in from this list; deleting one removes their account and stock-take."}</p>
+            <p className="se-foot">{lang === "zh" ? "公司 ID 與歷史紀錄保留。承辦人離職時，停用個人帳號即可。" : "Company IDs and history are preserved. Disable the individual account when a staff member leaves."}</p>
           </React.Fragment> :
         tab === "parts" ?
         <React.Fragment>

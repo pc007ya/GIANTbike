@@ -203,11 +203,6 @@
     // Always compress and convert to WebP first.
     return window.bffResizeImage(file, maxPx, quality, capBytes).then(function (dataUri) {
       if (!isReady() || !storagePath) return dataUri;
-      // Keep vendor-side uploads inline (WebP data-URI) unless actively signed in as admin.
-      const isVendorPath = String(storagePath).indexOf("vendors/") === 0;
-      const u = window.AUTH && window.AUTH.get && window.AUTH.get();
-      const adminNow = !!(u && u.role === "admin");
-      if (isVendorPath && !adminNow) return dataUri;
       return window.bffUploadDataUri(dataUri, storagePath);
     });
   };
@@ -215,6 +210,12 @@
   window.bffUploadDataUri = function (dataUri, storagePath) {
     if (typeof dataUri !== "string" || dataUri.slice(0, 5) !== "data:") return Promise.resolve(dataUri);
     if (!isReady() || !storagePath) return Promise.resolve(dataUri);
+    // Only vetted common catalog assets may go to a public repository.
+    // Supplier and per-vendor product files stay in private Firestore data.
+    const clean=String(storagePath).replace(/\\/g,"/").replace(/^\/+/, "");
+    if (!window.AUTH?.isAdmin(window.AUTH.get())
+        || !/^catalog\/(?:parts|equipment|tests|steps|schematic)\//.test(clean)
+        || clean.split("/").some(x=>x==="."||x==="..")) return Promise.resolve(dataUri);
     const cfg = getConfig();
     const fullPath = normalizeRepoPath(storagePath, cfg.dir);
     if (!fullPath) return Promise.resolve(dataUri);

@@ -9,27 +9,25 @@ function stockState(stock, required) {
 }
 
 /* ---- live stock overrides (vendor stock-take), per-vendor, persisted ---- */
-function stockKeyFor() {
-  const v = window.AUTH && window.AUTH.get();
-  return "bff:stock:" + (v ? v.id : "anon");
-}
-function loadStock() { try { return JSON.parse(localStorage.getItem(stockKeyFor()) || "{}"); } catch (e) { return {}; } }
-function saveStock(obj) { try { localStorage.setItem(stockKeyFor(), JSON.stringify(obj)); } catch (e) {} }
+function loadStock() { return window.AUTH.stockOf(window.AUTH.get()?.id); }
+function saveStock(obj) { const u=window.AUTH.get();if(u)window.AUTH.cache.write("stock",u.id,obj); }
 function getEntry(key) { return loadStock()[key]; }            // { qty, by:{zh,en}, at } | undefined
 function getStock(key, fallback) { const e = getEntry(key); return e && e.qty != null ? e.qty : fallback; }
 function isOverridden(key) { return !!getEntry(key); }
 function setStock(key, val) {
   const s = loadStock();
   const v = window.AUTH && window.AUTH.get();
+  if (!v || v.role !== "vendor" || !window.CLOUD?.readyForWrites) return;
   if (val === "" || val == null || isNaN(val)) delete s[key];
-  else s[key] = { qty: Math.max(0, Math.round(+val)), by: v ? v.name : { zh: "—", en: "—" }, at: Date.now() };
+  else s[key] = { qty: Math.max(0, Math.round(+val)), by: {zh:v.email,en:v.email}, at: Date.now() };
   saveStock(s);
+  window.dispatchEvent(new CustomEvent("bff:stockwrite",{detail:{vendorId:v.id,key,value:s[key]}}));
   window.dispatchEvent(new CustomEvent("bff:stockchange"));
   if (s[key] && window.SHEETS && window.SHEETS.pushStockDebounced) {
     window.SHEETS.pushStockDebounced(key, s[key]);
   }
 }
-function resetStock() { saveStock({}); window.dispatchEvent(new CustomEvent("bff:stockchange")); }
+function resetStock(){Object.keys(loadStock()).forEach(key=>setStock(key,null));}
 
 function fmtStamp(ts, lang) {
   if (!ts) return "";

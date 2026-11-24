@@ -130,34 +130,14 @@
 (function () {
   const KEYS = { items: "bff:items:v2", vendors: "bff:vendors:v1", parts: "bff:parts:v2", equipment: "bff:equipment:v1", testcodes: "bff:testcodes:v1", bikecats: "bff:bikecats:v1", log: "bff:auditlog:v1" };
   const clone = (x) => JSON.parse(JSON.stringify(x));
-  const useIDB = !!(window.KV && window.KV.available);
-  const load = (k, f) => { try { const v = JSON.parse(localStorage.getItem(k)); return v == null ? f : v; } catch (e) { return f; } };
-  // write-through: prefer IndexedDB (big quota); fall back to localStorage and
-  // surface a visible error if even that fails (e.g. quota exceeded on file://).
-  const save = (k, v) => {
-    if (useIDB) {
-      window.KV.set(k, v).catch(() => saveLocal(k, v));
-      return;
-    }
-    saveLocal(k, v);
-  };
-  function saveLocal(k, v) {
-    try { localStorage.setItem(k, JSON.stringify(v)); }
-    catch (e) { try { window.dispatchEvent(new CustomEvent("bff:saveerror", { detail: { key: k, error: String(e && e.name || e) } })); } catch (e2) {} }
-  }
-
+  // Session-only cache. Older on-disk copies are not loaded or deleted.
+  const save = () => {};
   const defaults = { items: clone(window.DATA.ITEMS), vendors: clone(window.AUTH.VENDORS), parts: clone(window.DATA.PARTS), equipment: clone(window.DATA.EQUIPMENT || {}), testcodes: [], bikecats: ["MTB", "CITY", "ROAD", "E-CITY", "E-MTB", "Others"] };
 
   // live state (mutated in place so existing window.DATA.* / window.AUTH.* readers stay valid)
-  const items = load(KEYS.items, null) || clone(window.DATA.ITEMS);
-  const vendors = load(KEYS.vendors, null) || clone(window.AUTH.VENDORS);
-  const parts = load(KEYS.parts, null) || clone(window.DATA.PARTS);
-  const _loadedEquip = load(KEYS.equipment, null);
-  const equipment = (_loadedEquip && Object.keys(_loadedEquip).length) ? _loadedEquip : clone(window.DATA.EQUIPMENT || {});
-  const testcodes = load(KEYS.testcodes, []);
-  const _loadedCats = load(KEYS.bikecats, null);
-  const bikecats = (_loadedCats && _loadedCats.length) ? _loadedCats : clone(defaults.bikecats);
-  const log = load(KEYS.log, []);
+  const items=clone(defaults.items), vendors=clone(defaults.vendors);
+  const parts=clone(defaults.parts), equipment=clone(defaults.equipment);
+  const testcodes=[], bikecats=clone(defaults.bikecats), log=[];
   window.DATA.ITEMS = items;
   window.DATA.PARTS = parts;
   window.DATA.EQUIPMENT = equipment;
@@ -180,7 +160,7 @@
   }
   function markEquipMigrated() { try { localStorage.setItem(_EQMIG, "1"); } catch (e) {} }
   migrateEquip();
-  if (!useIDB) markEquipMigrated();
+
 
   // normalize legacy object-shaped `version` fields (an earlier iteration of
   // this feature stored version as {zh,en}; the shipped schema is a plain string)
@@ -220,22 +200,6 @@
     return touched;
   }
   normalizeTestcodes();
-
-  /* ---- admin access code: hash-only storage (security hardening) ----
-     Older sessions/synced docs may still hold the PLAINTEXT admin password
-     under "bff:admincode" (from before this fix). Firestore's rules let any
-     signed-in user — including the anonymous session every visitor gets —
-     read the shared master doc, so a plaintext password there is effectively
-     public. This migrates any such value to its SHA-256 hash, once,
-     silently, without needing the admin to re-enter anything. */
-  const DEFAULT_ADMIN_HASH = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"; // sha256("admin")
-  function looksLikeHash(s) { return typeof s === "string" && /^(fnv1a[0-9a-f]{8}|[0-9a-f]{64})$/i.test(s); }
-  (async function migrateAdminCodeToHash() {
-    try {
-      const v = localStorage.getItem("bff:admincode");
-      if (v && !looksLikeHash(v)) { localStorage.setItem("bff:admincode", await window.bffSha256(v)); }
-    } catch (e) {}
-  })();
 
   const emit = () => window.dispatchEvent(new CustomEvent("bff:datachange"));
   const actor = () => { const u = window.AUTH.get && window.AUTH.get(); return u && u.name ? u.name : { zh: "系統", en: "System" }; };
@@ -323,22 +287,13 @@
     return id;
   }
   function vendors_save(v, oldId) {
-    // rename: migrate stock-take and remove the old record
-    if (oldId && oldId !== v.id) {
-      const oi = vendors.findIndex((x) => x.id === oldId);
-      if (oi >= 0) vendors.splice(oi, 1);
-      try {
-        const s = localStorage.getItem("bff:stock:" + oldId);
-        if (s != null) { localStorage.setItem("bff:stock:" + v.id, s); localStorage.removeItem("bff:stock:" + oldId); }
-      } catch (e) {}
-    }
+    if ((oldId && oldId !== v.id) || !window.GIANTBIKE_ACCESS.validVendor(v.id)) throw new Error("Vendor ID is immutable or invalid");
+    v={id:v.id,name:v.name};
     const idx = vendors.findIndex((x) => x.id === v.id);
     if (idx >= 0) {
       const before = vendors[idx];
       const ch = [];
       if (JSON.stringify(before.name) !== JSON.stringify(v.name)) ch.push({ zh: `名稱 → ${v.name.zh}`, en: `Name → ${v.name.en}` });
-      if (before.code !== v.code) ch.push({ zh: "更新存取碼", en: "Access code changed" });
-      if (oldId && oldId !== v.id) ch.push({ zh: `代號 ${oldId} → ${v.id}`, en: `ID ${oldId} → ${v.id}` });
       vendors[idx] = v;
       save(KEYS.vendors, vendors);
       addLog({ action: "update", entity: "vendor", targetId: v.id, targetName: clone(v.name), changes: ch.length ? ch : [{ zh: "更新供應商資料", en: "Updated vendor" }] });
@@ -355,7 +310,7 @@
     const v = vendors[idx];
     vendors.splice(idx, 1);
     save(KEYS.vendors, vendors);
-    try { localStorage.removeItem("bff:stock:" + id); } catch (e) {}
+    // Keep legacy and cloud records for retention and export.
     addLog({ action: "delete", entity: "vendor", targetId: id, targetName: clone(v.name), changes: [{ zh: "刪除供應商", en: "Removed vendor" }] });
     emit();
   }
@@ -677,37 +632,9 @@
   }
   const newEquipKey = () => "e_" + Date.now().toString(36);
 
-  /* ---- per-vendor step comparison photos (供應商實拍對比照) ----
-     Vendors CANNOT edit the shared/official step image (item.steps[i].image —
-     only the admin's TestEditor writes that). Instead each vendor may attach
-     their OWN photo alongside it, purely for self-comparison; other vendors
-     never see it. Stored per-vendor as one map so it mirrors the existing
-     bff_stock / bff_report cloud-sync pattern (see cloud.js):
-       localStorage "bff:stepphoto:<vendorId>" -> { "<itemId>:<stepIndex>": dataUri }
-     Admin's browser additionally receives every vendor's doc via cloud.js'
-     collection subscription (same as stock/report), so admin can review
-     submissions read-only; admin still cannot overwrite them. */
   function stepphoto_key(itemId, stepIndex) { return itemId + ":" + stepIndex; }
-  /* Step photos are base64 data-URIs → they blow past localStorage's ~5MB cap
-     ("空間不足"). Store in IndexedDB (big quota) with an in-memory cache for
-     synchronous reads and legacy-localStorage migration, mirroring the store. */
-  const _stepCache = {};           // vendorId -> map
-  function _stepLoadLS(vendorId) {
-    try { return JSON.parse(localStorage.getItem("bff:stepphoto:" + vendorId) || "{}"); } catch (e) { return {}; }
-  }
-  function stepphoto_mapFor(vendorId) {
-    if (_stepCache[vendorId]) return _stepCache[vendorId];
-    const v = _stepLoadLS(vendorId);
-    _stepCache[vendorId] = v;
-    return v;
-  }
-  function _stepPersist(vendorId, map) {
-    _stepCache[vendorId] = map;
-    if (useIDB) {
-      window.KV.set("bff:stepphoto:" + vendorId, map).catch(() => saveLocal("bff:stepphoto:" + vendorId, map));
-      try { localStorage.removeItem("bff:stepphoto:" + vendorId); } catch (e) {}
-    } else { saveLocal("bff:stepphoto:" + vendorId, map); }
-  }
+  function stepphoto_mapFor(vendorId) { return window.AUTH.cache.read("stepphoto",vendorId); }
+  function _stepPersist(vendorId,map) { return window.AUTH.cache.write("stepphoto",vendorId,map); }
   function stepphoto_get(vendorId, itemId, stepIndex) {
     if (!vendorId) return null;
     return stepphoto_mapFor(vendorId)[stepphoto_key(itemId, stepIndex)] || null;
@@ -719,7 +646,8 @@
     // replacing an uploaded photo: drop the old Storage object (best-effort)
     if (prev && prev !== dataUri && typeof prev === "string" && /^https?:/.test(prev) && window.bffDeleteStorage) window.bffDeleteStorage(prev);
     map[stepphoto_key(itemId, stepIndex)] = dataUri;
-    _stepPersist(vendorId, map);
+    _stepPersist(vendorId,map);
+    window.dispatchEvent(new CustomEvent("bff:stepphotowrite",{detail:{vendorId,key:stepphoto_key(itemId,stepIndex),value:dataUri}}));
     window.dispatchEvent(new CustomEvent("bff:stepphotochange"));
   }
   function stepphoto_remove(vendorId, itemId, stepIndex) {
@@ -728,7 +656,8 @@
     const prev = map[stepphoto_key(itemId, stepIndex)];
     if (prev && typeof prev === "string" && /^https?:/.test(prev) && window.bffDeleteStorage) window.bffDeleteStorage(prev);
     delete map[stepphoto_key(itemId, stepIndex)];
-    _stepPersist(vendorId, map);
+    _stepPersist(vendorId,map);
+    window.dispatchEvent(new CustomEvent("bff:stepphotowrite",{detail:{vendorId,key:stepphoto_key(itemId,stepIndex),value:undefined}}));
     window.dispatchEvent(new CustomEvent("bff:stepphotochange"));
   }
   /* all of one vendor's submissions, as [{itemId, stepIndex, dataUri}] */
@@ -750,36 +679,10 @@
     return out;
   }
 
-  /* async: hydrate step photos from IDB into the cache (sync reads need it),
-     migrate any legacy localStorage maps, then refresh the UI. */
-  (async function hydrateStepPhotos() {
-    if (!useIDB || !window.KV.keys) return;
-    try {
-      const ks = (await window.KV.keys()) || [];
-      for (const k of ks) {
-        if (k.indexOf("bff:stepphoto:") === 0) {
-          const v = await window.KV.get(k);
-          if (v) _stepCache[k.slice("bff:stepphoto:".length)] = v;
-        }
-      }
-      for (let i = 0; i < localStorage.length; i++) {   // migrate legacy LS → IDB
-        const k = localStorage.key(i);
-        if (k && k.indexOf("bff:stepphoto:") === 0) {
-          const vid = k.slice("bff:stepphoto:".length);
-          if (!_stepCache[vid]) {
-            const v = _stepLoadLS(vid);
-            if (v && Object.keys(v).length) { _stepCache[vid] = v; window.KV.set(k, v).catch(() => {}); }
-          }
-        }
-      }
-      window.dispatchEvent(new CustomEvent("bff:stepphotochange"));
-    } catch (e) {}
-  })();
-
   /* ---- snapshot backup / restore (stand-in for cloud sync) ---- */
   function collectStock() {
     const out = {};
-    vendors.forEach((v) => { const s = localStorage.getItem("bff:stock:" + v.id); if (s) out[v.id] = JSON.parse(s); });
+    vendors.forEach(v=>{out[v.id]=window.AUTH.stockOf(v.id);});
     return out;
   }
   function exportSnapshot() {
@@ -797,7 +700,7 @@
     log.length = 0; (snap.log || []).forEach((e) => log.push(e));
     migrateEquip();
     save(KEYS.items, items); save(KEYS.vendors, vendors); save(KEYS.parts, parts); save(KEYS.equipment, equipment); save(KEYS.testcodes, testcodes); save(KEYS.bikecats, bikecats); save(KEYS.log, log);
-    if (snap.stock) Object.keys(snap.stock).forEach((vid) => { try { localStorage.setItem("bff:stock:" + vid, JSON.stringify(snap.stock[vid])); } catch (e) {} });
+    // Legacy snapshot stock is not written back automatically; cloud records are unchanged.
     addLog({ action: "update", entity: "system", targetId: "restore", targetName: { zh: "資料還原", en: "Data restore" }, changes: [{ zh: "已從備份檔還原全部資料", en: "Restored all data from snapshot" }] });
     emit();
     window.dispatchEvent(new CustomEvent("bff:stockchange"));
@@ -817,42 +720,17 @@
     if (snap.testcodes) { testcodes.length = 0; snap.testcodes.forEach((c) => testcodes.push(c)); normalizeTestcodes(); save(KEYS.testcodes, testcodes); }
     if (snap.bikecats && snap.bikecats.length) { bikecats.length = 0; snap.bikecats.forEach((c) => bikecats.push(c)); save(KEYS.bikecats, bikecats); }
     if (snap.log) { log.length = 0; snap.log.forEach((e) => log.push(e)); save(KEYS.log, log); }
-    if (snap.adminCode) {
-      if (looksLikeHash(snap.adminCode)) { try { localStorage.setItem("bff:admincode", snap.adminCode); } catch (e) {} }
-      else { window.bffSha256(snap.adminCode).then((h) => { try { localStorage.setItem("bff:admincode", h); } catch (e) {} }); }
-    }
-    if (snap.sheetsConfig && typeof snap.sheetsConfig === "object") {
-      try { localStorage.setItem("bff:sheetsconfig", JSON.stringify(snap.sheetsConfig)); } catch (e) {}
-    }
     if (migrateEquip()) save(KEYS.items, items);
     emit();
     setTimeout(() => { applyingRemote = false; }, 0);
   }
   const isApplyingRemote = () => applyingRemote;
-  const snapshotData = () => ({ items: clone(items), vendors: clone(vendors), parts: clone(parts), equipment: clone(equipment), testcodes: clone(testcodes), bikecats: clone(bikecats), log: clone(log), adminCode: admincode_get(), sheetsConfig: sheets_get() });
-
-  function sheets_get() {
-    try { return JSON.parse(localStorage.getItem("bff:sheetsconfig") || "null") || {}; }
-    catch (e) { return {}; }
-  }
-  function sheets_set(cfg) {
-    try { localStorage.setItem("bff:sheetsconfig", JSON.stringify(cfg || {})); } catch (e) {}
-    addLog({ action: "update", entity: "system", targetId: "sheets", targetName: { zh: "Google 試算表連動", en: "Google Sheets sync" }, changes: [{ zh: cfg && cfg.enabled ? "已更新並啟用 Google 試算表同步" : "已更新 Google 試算表同步設定", en: "Updated Google Sheets sync config" }] });
-    emit();
-  }
-
-  function admincode_get() { try { return localStorage.getItem("bff:admincode") || DEFAULT_ADMIN_HASH; } catch (e) { return DEFAULT_ADMIN_HASH; } }
-  async function admincode_set(code) {
-    const c = String(code == null ? "" : code).trim();
-    if (!c) return;
-    const hash = await window.bffSha256(c);
-    try { localStorage.setItem("bff:admincode", hash); } catch (e) {}
-    addLog({ action: "update", entity: "system", targetId: "admincode", targetName: { zh: "管理員存取碼", en: "Admin access code" }, changes: [{ zh: "已變更管理員存取碼", en: "Admin access code changed" }] });
-    emit();
-  }
-
+  const snapshotData=()=>({items:clone(items),vendors:clone(vendors).map(v=>({id:v.id,name:v.name})),parts:clone(parts),equipment:clone(equipment),testcodes:clone(testcodes),bikecats:clone(bikecats),log:clone(log)});
+  function sheets_get(){return {};}
+  function sheets_set(){/* retired direct-from-browser receiver */}
+  function resetAccessScope(){hydrate({...clone(defaults),log:[],testcodes:[]});}
   function resetAll() {
-    [KEYS.items, KEYS.vendors, KEYS.parts, KEYS.equipment, KEYS.testcodes, KEYS.bikecats, KEYS.log].forEach((k) => { try { localStorage.removeItem(k); } catch (e) {} if (useIDB) window.KV.del(k); });
+    // Do not remove archived local caches or supplier documents.
     items.length = 0; clone(defaults.items).forEach((i) => items.push(i));
     vendors.length = 0; clone(defaults.vendors).forEach((v) => vendors.push(v));
     Object.keys(parts).forEach((k) => delete parts[k]); Object.assign(parts, clone(defaults.parts));
@@ -892,7 +770,7 @@
     testcodes_list, testcodes_get, testcodes_save, testcodes_delete, blankTestcode, newTestcodeKey, testcodes_forVendor, testcodes_itemIdsForVendor, nextTestcodeCode,
     bikecats_list, bikecats_add, bikecats_remove,
     exportSnapshot, importSnapshot, hydrate, isApplyingRemote, snapshotData,
-    admincode_get, admincode_set, sheets_get, sheets_set,
+    resetAccessScope, sheets_get, sheets_set,
     log_list, addLog, resetAll,
     stepphoto_get, stepphoto_set, stepphoto_remove, stepphoto_forVendor, stepphoto_allSubmissions,
     // cloud-sync accessors: read/write the IDB-backed step-photo map for a vendor
@@ -900,33 +778,4 @@
     stepphoto_putMap: (vid, map) => { if (vid) _stepPersist(vid, map || {}); },
   };
 
-  /* ---- async boot: prefer IndexedDB; migrate any legacy localStorage data ---- */
-  (async function boot() {
-    if (!useIDB) return;
-    const specs = [KEYS.items, KEYS.vendors, KEYS.parts, KEYS.equipment, KEYS.testcodes, KEYS.bikecats, KEYS.log];
-    const liveFor = (k) => k === KEYS.parts ? parts : k === KEYS.equipment ? equipment : k === KEYS.items ? items : k === KEYS.vendors ? vendors : k === KEYS.testcodes ? testcodes : k === KEYS.bikecats ? bikecats : log;
-    let changed = false;
-    for (const k of specs) {
-      const v = await window.KV.get(k);
-      if (v != null) {
-        if (k === KEYS.parts) { Object.keys(parts).forEach((x) => delete parts[x]); Object.assign(parts, v); }
-        else if (k === KEYS.equipment) { if (v && Object.keys(v).length) { Object.keys(equipment).forEach((x) => delete equipment[x]); Object.assign(equipment, v); } else { window.KV.set(k, equipment).catch(() => {}); } }
-        else if (k === KEYS.items) { items.length = 0; v.forEach((x) => items.push(x)); }
-        else if (k === KEYS.vendors) { vendors.length = 0; v.forEach((x) => vendors.push(x)); }
-        else if (k === KEYS.testcodes) { testcodes.length = 0; v.forEach((x) => testcodes.push(x)); }
-        else if (k === KEYS.bikecats) { if (v && v.length) { bikecats.length = 0; v.forEach((x) => bikecats.push(x)); } else { window.KV.set(k, bikecats).catch(() => {}); } }
-        else if (k === KEYS.log) { log.length = 0; v.forEach((x) => log.push(x)); }
-        changed = true;
-      } else {
-        // nothing in IDB yet — migrate whatever we loaded synchronously (localStorage/defaults)
-        window.KV.set(k, liveFor(k)).catch(() => {});
-        try { localStorage.removeItem(k); } catch (e) {}
-      }
-    }
-    if (migrateEquip()) { save(KEYS.items, items); changed = true; }
-    if (sanitizeItems()) changed = true;
-    if (normalizeTestcodes()) changed = true;
-    markEquipMigrated();
-    if (changed) emit();
-  })();
 })();
