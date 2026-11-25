@@ -41,6 +41,26 @@
     const library=xs=>Object.fromEntries(Object.entries(xs||{}).map(([k,v])=>[k,pick(v,["code","name","image","kind","material","version","updatedAt"])]));
     return {items,parts:library(snap.parts),equipment:library(snap.equipment),bikecats:clone(snap.bikecats||[])};
   }
+  // Build one supplier's catalog on the trusted publishing path. This is not
+  // a client-side permission check or a replacement for per-supplier rules.
+  function scopedVendorCatalog(snap, vendorId) {
+    const view = vendorProjectSnapshot(snap, vendorId);
+    const allowed = new Set(view.testcodes.flatMap(p => Array.isArray(p.itemIds) ? p.itemIds : [])
+      .filter(id => typeof id === "string" && id.length > 0));
+    const publicShape = catalogSnapshot(snap);
+    const items = publicShape.items.filter(item => allowed.has(item.id));
+    const refs = (field) => new Set(items.flatMap(item => item[field] || [])
+      .map(entry => entry.key).filter(key => typeof key === "string" && key.length > 0));
+    const select = (dict, keys) => Object.fromEntries(
+      Object.entries(dict).filter(([key]) => keys.has(key)));
+    return {
+      vendor: view.vendor,
+      testcodes: view.testcodes,
+      items,
+      parts: select(publicShape.parts, refs("fixtures")),
+      equipment: select(publicShape.equipment, refs("equipment")),
+    };
+  }
   function canRead(scope, id) { return !!scope && (scope.role === "admin" || scope.id === id); }
   function memory() {
     let scope = null;
@@ -59,7 +79,7 @@
       },
     };
   }
-  const api = {session, verifiedLogin, validVendor, vendorProjectSnapshot, catalogSnapshot, memory};
+  const api = {session, verifiedLogin, validVendor, vendorProjectSnapshot, catalogSnapshot, scopedVendorCatalog, memory};
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.GIANTBIKE_ACCESS = Object.freeze(api);
 })(typeof window === "undefined" ? globalThis : window);
