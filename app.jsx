@@ -327,8 +327,9 @@ function authMessage(error, zh) {
   const messages = {
     "bff/email-unverified": ["請先驗證開戶信箱，驗證後再登入。", "Verify your company email before signing in."],
     "bff/not-provisioned": ["此帳號未開通供應商權限。請先用管理員開通的信箱和密碼登入。", "No vendor access. Sign in first with your provisioned email/password."],
+    "bff/new-password-required": ["請輸入至少 12 字元、且和舊密碼不同的新密碼。", "Use a new password of at least 12 characters, different from the current password."],
     "bff/not-admin": ["此 Google 帳號沒有管理員權限。", "This Google account is not an authorized administrator."],
-    "bff/cloud-unavailable": ["登入服務目前無法使用，公開目錄仍可查詢。", "Sign-in is unavailable; the public catalog still works."],
+    "bff/cloud-unavailable": ["登入服務目前無法使用，請稍後再試。", "Sign-in is unavailable. Try again later."],
     "bff/reauth-required": ["密碼確認已逾時，請重新確認。", "Password confirmation expired; please repeat it."],
     "auth/credential-already-in-use": ["這個 Google 帳號已綁定另一個帳號。請聯絡管理員，不會自動合併。", "This Google account is already linked elsewhere. Contact the administrator; nothing was merged."],
     "auth/account-exists-with-different-credential": ["請先用信箱和密碼登入，再從「我的帳號」綁定 Google。", "Sign in with your email/password and link Google in My account."],
@@ -366,14 +367,14 @@ function Login({lang,setLang,t}) {
       </div>
       <h1 className="login-title">{mode==="vendor"?(zh?"供應商登入":"Vendor sign-in"):(zh?"管理員登入":"Admin sign-in")}</h1>
       {mode==="vendor" ? <>
-        <p className="login-sub">{zh?"請使用管理員開通的公司信箱。第一次先設定密碼並驗證信箱，再到「我的帳號」綁定 Google。":"Use the company email provisioned by your administrator. Set your password and verify the email before linking Google in My account."}</p>
+        <p className="login-sub">{zh?"第一次請直接用管理員提供的帳號與初始密碼登入。驗證公司信箱後，可在「我的帳號」改密碼、綁定 Google。":"For your first sign-in, use the account and initial password from your administrator. Verify your company email, then use My account to change your password and link Google."}</p>
         <label className="login-label" htmlFor="login-email">{zh?"公司信箱":"Company email"}</label>
         <input id="login-email" className="login-input" type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} required/>
         <label className="login-label" htmlFor="login-password">{zh?"密碼":"Password"}</label>
         <input id="login-password" className="login-input" type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required/>
         <button className="btn login-btn" type="submit" disabled={busy}>{zh?"以信箱登入":"Sign in with email"}</button>
         <button type="button" className="login-google" disabled={busy} onClick={()=>run(c=>c.signInVendor("", "",true))}>{zh?"以已綁定的 Google 帳號登入":"Sign in with linked Google account"}</button>
-        <button type="button" className="btn ghost" disabled={busy||!email.trim()} onClick={()=>run(c=>c.requestReset(email),zh?"若此帳號已開通，將收到設定或重設密碼的信。":"If this account exists, a password setup/reset email will be sent.")}>{zh?"設定／重設密碼":"Set/reset password"}</button>
+        <button type="button" className="btn ghost" disabled={busy||!email.trim()} onClick={()=>run(c=>c.requestReset(email),zh?"若此帳號已開通，將收到重設密碼的信。":"If this account exists, a password reset email will be sent.")}>{zh?"忘記密碼":"Forgot password"}</button>
         {error?.code==="bff/email-unverified"&&<button type="button" className="btn ghost" disabled={busy} onClick={()=>run(c=>c.verifyEmail(),zh?"已寄出驗證信，完成後請再登入。":"Verification email sent. Sign in again after verification.")}>{zh?"重寄驗證信":"Resend verification email"}</button>}
       </>:<>
         <p className="login-sub">{zh?"使用已核准的管理員 Google 帳號。":"Use an authorized administrator Google account."}</p>
@@ -381,7 +382,6 @@ function Login({lang,setLang,t}) {
       </>}
       {error && <p className="login-err" role="alert">{authMessage(error,zh)}</p>}
       {message && <p role="status">{message}</p>}
-      <a href="#" className="btn ghost guide-link" style={{marginTop:12}}>{zh?"返回公開治具目錄":"Back to public fixture catalog"}</a>
     </form>
   </div>;
 }
@@ -389,6 +389,7 @@ function VendorAccount({lang,vendor}) {
   const zh=lang==="zh";
   const [password,setPassword]=uState(""),[verified,setVerified]=uState(false),[busy,setBusy]=uState(false),[error,setError]=uState(null);
   const [linked,setLinked]=uState(false), [statusReady,setStatusReady]=uState(false);
+  const [oldPassword,setOldPassword]=uState(""), [newPassword,setNewPassword]=uState(""), [passwordChanged,setPasswordChanged]=uState(false);
   uEffect(()=>{
     let alive=true;
     window.CLOUD.googleLinkStatus().then(v=>{if(alive){setLinked(v==="active");setStatusReady(true);}}).catch(e=>{if(alive)setError(e);});
@@ -410,6 +411,19 @@ function VendorAccount({lang,vendor}) {
       <input id="link-password" className="login-input" type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="current-password" required/>
       <button className="btn" disabled={busy} type="submit">{zh?"確認並啟用":"Confirm and activate"}</button>
     </form>}
+    <form onSubmit={e=>{e.preventDefault();setPasswordChanged(false);
+      const old=oldPassword,next=newPassword;
+      setOldPassword("");setNewPassword("");
+      run(()=>window.CLOUD.changeVendorPassword(old,next),()=>setPasswordChanged(true));
+    }}>
+      <h2>{zh?"更改登入密碼":"Change sign-in password"}</h2>
+      <label htmlFor="account-old-password">{zh?"目前密碼":"Current password"}</label>
+      <input id="account-old-password" type="password" autoComplete="current-password" value={oldPassword} onChange={e=>setOldPassword(e.target.value)} disabled={busy} required/>
+      <label htmlFor="account-new-password">{zh?"新密碼（至少 12 字元）":"New password (at least 12 characters)"}</label>
+      <input id="account-new-password" type="password" autoComplete="new-password" value={newPassword} onChange={e=>setNewPassword(e.target.value)} disabled={busy} minLength={12} required/>
+      <button className="btn" disabled={busy||verified} type="submit">{zh?"更新密碼":"Update password"}</button>
+    </form>
+    {passwordChanged&&<p role="status">{zh?"密碼已更新。原專案權限與 Google 綁定不變。":"Password updated. Your project access and Google link are unchanged."}</p>}
     {error&&<p className="login-err" role="alert">{authMessage(error,zh)}</p>}
   </section>;
 }
@@ -541,8 +555,7 @@ function App() {
   const dir = window.THEMES[tw.direction];
   const admin = window.AUTH.isAdmin(vendor);
 
-  const publicPages = ["list", "detail", "fixtures", "fixtureDetail"];
-  if (!vendor && !publicPages.includes(route.name)) return <Login lang={lang} setLang={setLang} t={t} />;
+  if (!vendor) return <Login lang={lang} setLang={setLang} t={t} />;
   const canWrite = !!window.CLOUD?.readyForWrites;
 
   return (
@@ -642,10 +655,14 @@ function App() {
       </header>
 
       <main className="main" key={vendor?.uid || "public"}>
-        {vendor && !canWrite && !publicPages.includes(route.name) && route.name !== "account" && route.name !== "login" ?
+        {!canWrite && route.name !== "account" ?
         <p role="status" className="block">{lang==="zh"?"正在連線驗證資料，暫時無法編輯。":"Verifying your data connection; editing is unavailable."}</p> :
         route.name === "account" && vendor && !admin ?
         <VendorAccount key={vendor.uid} lang={lang} vendor={vendor}/> :
+        !admin && route.name === "detail" && !item ?
+        <p role="status" className="block">{lang==="zh"?"這個測試未分配給你的公司。":"This test is not assigned to your company."}</p> :
+        !admin && route.name === "fixtureDetail" && !Object.hasOwn(window.DATA.PARTS || {},route.key) ?
+        <p role="status" className="block">{lang==="zh"?"這個治具不在你的專案內。":"This fixture is not part of your assigned projects."}</p> :
         route.name === "detail" && item ?
         <Detail item={item} lang={lang} t={t} onBack={goTests} vendor={canWrite ? vendor : null} admin={canWrite && admin} onZoom={(src, cap) => setZoom({ src, cap })} /> :
         route.name === "fixtureDetail" ?

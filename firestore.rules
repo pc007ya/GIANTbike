@@ -100,15 +100,23 @@ service cloud.firestore {
     }
 
     match /bff_catalog/{docId} {
-      allow read: if isAdmin() || isSupplier();
+      allow read: if isAdmin();
       allow write: if isAdmin();
+    }
+
+    function activeProjectChunk(vendorId, chunk) {
+      let current = get(/databases/$(database)/documents/bff_vendorProjects/$(vendorId)).data;
+      return current.chunked == true && chunk._rev == current._rev
+        && chunk.i is int && chunk.i >= 0 && chunk.i < current.chunks;
     }
 
     match /bff_vendorProjects/{vendorId} {
       allow read: if isAdmin() || owns(vendorId);
       allow write: if isAdmin();
       match /chunks/{chunkId} {
-        allow read: if isAdmin() || owns(vendorId);
+        // Only the active version is readable; leftovers from a larger old
+        // projection must not disclose a removed assignment.
+        allow read: if isAdmin() || (owns(vendorId) && activeProjectChunk(vendorId, resource.data));
         allow write: if isAdmin();
       }
     }

@@ -297,7 +297,7 @@ function SupplierAccountAdminCard({lang}) {
   }
   return <div className="admincode-card">
     <h3>{zh?"供應商個人帳號":"Supplier accounts"}</h3>
-    <p>{zh?"先在 Firebase 控制台以公司信箱開戶，再把同一帳號的 UID、信箱及公司登記在這裡。此頁不存密碼、不寄開戶信。":"Create the company email account in Firebase Console first, then register that account's exact UID, email, and company here. No passwords or invite emails are handled here."}</p>
+    <p>{zh?"管理員先在 Firebase Authentication 用公司信箱和獨立初始密碼開戶，再登記同一帳號的 UID、信箱及供應商。初始密碼用公司核准的私下管道交付，不留在本頁。":"In Firebase Authentication, create the account with the company email and a unique initial password. Register the same account UID, email and supplier here. Share the password privately through your approved company channel; this page does not store it."}</p>
     <a className="btn ghost sm" href="ops/account-guide.html" target="_blank" rel="noopener">{zh?"開戶與停用指引":"Account administration guide"}</a>{" "}
     <button className="btn sm" disabled={uiBusy} onClick={()=>make(()=>window.CLOUD.publishSupplierViews(),zh?"已確認發布供應商目錄與專案。":"Supplier catalog and assignments published.")}>{zh?"發布供應商目錄與專案":"Publish the supplier catalog and projects"}</button>
     <label htmlFor="supplier-uid">Firebase UID</label>
@@ -309,7 +309,7 @@ function SupplierAccountAdminCard({lang}) {
       <option value="">{zh?"請選擇":"Select a company"}</option>
       {catalog.map(v=><option key={v.id} value={v.id}>{L2(v.name,lang)} ({v.id})</option>)}
     </select>
-    <button className="btn sm" disabled={uiBusy||!pair.uid||!pair.email||!vendorId} onClick={()=>make(()=>window.CLOUD.registerSupplier(pair.uid,pair.email,vendorId),zh?"已登記個人帳號，承辦人可自設密碼並驗證信箱。":"Registered. The supplier can now set a password and verify their email.")}>{zh?"登記權限":"Register access"}</button>{" "}
+    <button className="btn sm" disabled={uiBusy||!pair.uid||!pair.email||!vendorId} onClick={()=>make(()=>window.CLOUD.registerSupplier(pair.uid,pair.email,vendorId),zh?"已登記；承辦人可用管理員提供的帳密登入並驗證信箱。":"Registered. The supplier can sign in with the credentials you gave them and verify their email.")}>{zh?"登記權限":"Register access"}</button>{" "}
     <button className="btn ghost sm" disabled={uiBusy||!pair.uid} onClick={async()=>{const p=await make(()=>window.CLOUD.lookupSupplier(pair.uid));setRecord(p?{uid:pair.uid,...p}:null);if(p===null)setState(zh?"未登記。":"Not registered.");}}>{zh?"查詢此帳號":"Look up this account"}</button>{" "}
     {record&&<p>{record.email} · {record.vendorId} · {record.enabled?(zh?"啟用":"Enabled"):(zh?"停用":"Disabled")}{" "}<button className="btn ghost sm" disabled={uiBusy||!record.enabled} onClick={stop}>{zh?"停用權限":"Disable access"}</button></p>}
     {state&&<p role="status">{state}</p>}

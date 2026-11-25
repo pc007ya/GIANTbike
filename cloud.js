@@ -6,7 +6,7 @@ const CLOUD = {
   readyForWrites: false, setConfig, disableCloud, signIn: signInAdmin, signInAdmin,
   signInVendor, requestReset, verifyEmail, confirmLinkPassword, linkGoogle,
   googleLinked, googleLinkStatus, signOutCloud, appendAnomaly, publishSupplierViews,
-  registerSupplier, lookupSupplier, disableSupplier,
+  registerSupplier, lookupSupplier, disableSupplier, changeVendorPassword,
   writeReport:(vendorId,key,value)=>writeCell("report",vendorId,key,value),
 };
 window.CLOUD = CLOUD;
@@ -219,6 +219,19 @@ async function confirmLinkPassword(password) {
     startSync(me,g);
   } finally {manualAuth=false;}
 }
+async function changeVendorPassword(currentPassword, nextPassword) {
+  const {me,user,g}=scopedVendor();
+  if(typeof nextPassword!=="string" || nextPassword.length<12 || nextPassword===currentPassword)
+    throw fail("bff/new-password-required");
+  if (manualAuth || linkPermit) throw fail("bff/reauth-required");
+  manualAuth=true; tokenEvent++;
+  try {
+    await api.a.reauthenticateWithCredential(user,api.a.EmailAuthProvider.credential(me.email,currentPassword));
+    if (!same(g) || api.auth.currentUser?.uid!==me.uid || signOutPending) throw fail("bff/session-changed");
+    await api.a.updatePassword(user,nextPassword);
+    if (!same(g) || api.auth.currentUser?.uid!==me.uid || signOutPending) throw fail("bff/session-changed");
+  } finally { manualAuth=false; }
+}
 async function signOutCloud() {
   signOutPending = true;
   tokenEvent++;
@@ -242,12 +255,10 @@ function chunk(data) {
   return {json,parts};
 }
 function masterRef() { return api.f.doc(api.db,"bff","data"); }
-function catalogRef() { return api.f.doc(api.db,"bff_catalog","data"); }
 function projectsRef(vid) { return api.f.doc(api.db,"bff_vendorProjects",vid); }
 function documentPart(ref,i) {
   const {db,f}=api;
   if (ref.path === "bff/data") return f.doc(db,"bff","data_"+i); // existing legacy shape
-  if (ref.path === "bff_catalog/data") return f.doc(db,"bff_catalog","data_"+i);
   return f.doc(ref,"chunks","data_"+i);
 }
 function stageView(batch,ref,data) {
@@ -283,13 +294,12 @@ async function saveAdmin(g, force = false) {
   raw._rev=rev;
   const batch = api.f.writeBatch(api.db);
   let count=force ? 0 : stageView(batch,masterRef(),raw);
-  const next = {catalog:access.catalogSnapshot(raw), projects:new Map()};
+  const next = {projects:new Map()};
   const prev = priorProjections;
   const prevProjects = prev?.projects || new Map();
-  if (force || !prev || JSON.stringify(prev.catalog)!==JSON.stringify(next.catalog)) count+=stageView(batch,catalogRef(),{...next.catalog,_rev:rev});
   const active = new Set(raw.vendors.map(v=>v.id).filter(access.validVendor));
   for (const id of new Set([...active,...prevProjects.keys()])) {
-    const data = access.vendorProjectSnapshot(raw,id);
+    const data = access.scopedVendorCatalog(raw,id);
     if (active.has(id)) next.projects.set(id,data);
     if (force || JSON.stringify(prevProjects.get(id))!==JSON.stringify(data)) count+=stageView(batch,projectsRef(id),{...data,_rev:rev});
   }
@@ -325,7 +335,7 @@ function startSync(me,g) {
   const f=api.f, db=api.db;
   const isAdmin=me.role==="admin";
   priorProjections=null; lastMasterRev=0;
-  const pending=new Set(isAdmin ? ["master"] : ["catalog","projects","stock","report","stepphoto"]);
+  const pending=new Set(isAdmin ? ["master"] : ["projects","stock","report","stepphoto"]);
   const mark=key=>{
     pending.delete(key);
     if (!pending.size && same(g)) { CLOUD.readyForWrites=true; status("online"); }
@@ -344,13 +354,18 @@ function startSync(me,g) {
         syncFailure({code:"permission-denied",message:"Supplier access disabled"},g);
       }
     },()=>syncFailure({code:"permission-denied",message:"Supplier access disabled"},g));
-    subscribeView(catalogRef(),g,d=>{
-      window.STORE.hydrate(access.catalogSnapshot(d)); mark("catalog");
-    },()=>mark("catalog"));
-    subscribeView(projectsRef(me.id),g,d=>{
-      const view={vendors:d.vendor ? [d.vendor] : [],testcodes:Array.isArray(d.testcodes)?d.testcodes:[]};
-      window.STORE.hydrate(view); mark("projects");
-    },()=>{ window.STORE.hydrate({vendors:[], testcodes:[]}); mark("projects"); });
+    const apply=(d={})=>{
+      // Older projections without scoped items deliberately show no catalog.
+      const asMap=v=>v && typeof v==="object" && !Array.isArray(v) ? v : {};
+      window.STORE.hydrate({
+        vendors:d.vendor?.id===me.id ? [d.vendor] : [],
+        testcodes:Array.isArray(d.testcodes)?d.testcodes:[],
+        items:Array.isArray(d.items)?d.items:[],
+        parts:asMap(d.parts), equipment:asMap(d.equipment),
+      });
+      mark("projects");
+    };
+    subscribeView(projectsRef(me.id),g,apply,()=>apply());
   }
   const all = {...vendorCollections, ...(isAdmin ? {loginlog:"bff_loginlog"} : {})};
   for (const [kind,collection] of Object.entries(all)) {
