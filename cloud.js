@@ -1,428 +1,422 @@
-/* GIANTbike Auth + Firestore only. Public catalog pages never contact Firebase
-   for facility data; private data starts on a verified, provisioned session. */
-const access = window.GIANTBIKE_ACCESS;
+/* Optional Firebase cloud sync (Auth + Firestore).
+   STAYS FULLY LOCAL unless a Firebase config is provided
+   (via localStorage "bff:fbconfig" or window.FIREBASE_CONFIG).
+
+   Architecture: STORE remains the in-memory + localStorage source of truth.
+   This layer mirrors STORE <-> Firestore so multiple machines share one dataset:
+     - doc  bff/data            { items, vendors, parts, log }     (admin-edited)
+     - docs bff_stock/<vendorId>{ ...stock map }                  (per-vendor)
+   Last-write-wins on the data doc; per-vendor stock writes only touch their own doc.
+
+   Loaded as a module; self-guards so the app works with no config. */
+
 const CLOUD = {
-  enabled: false, configured: false, status: "local", message: "", user: null,
-  readyForWrites: false, setConfig, disableCloud, signIn: signInAdmin, signInAdmin,
-  signInVendor, requestReset, verifyEmail, confirmLinkPassword, linkGoogle,
-  googleLinked, googleLinkStatus, signOutCloud, appendAnomaly, publishSupplierViews,
-  registerSupplier, lookupSupplier, disableSupplier,
-  writeReport:(vendorId,key,value)=>writeCell("report",vendorId,key,value),
+  enabled: false,
+  status: "local",          // local | connecting | online | signedout | error
+  message: "",
+  user: null,
+  configured: false,
+  setConfig, disableCloud, signIn, signInAdmin, signOutCloud,
 };
 window.CLOUD = CLOUD;
-let api = null, releaseReady, generation = 0, sessionKey = "", firstData = false, writeTimer = null, listeners = [];
-let linkPermit = null, signOutPending = false, manualAuth = false, tokenEvent = 0;
-const ready = new Promise(r => { releaseReady = r; });
-const emit = () => window.dispatchEvent(new CustomEvent("bff:cloudstatus"));
-function status(value, message = "") { CLOUD.status = value; CLOUD.message = message; emit(); }
-function fail(code) { return Object.assign(new Error(code), {code}); }
-const same = (g) => g === generation;
-const resetURL = () => new URL(location.pathname, location.origin).href + "#/login";
-const vendorCollections = {stock:"bff_stock", report:"bff_report", stepphoto:"bff_stepphoto"};
-const readConfig = () => {
-  // When deployed, site config is pinned. A local dev sandbox may override only
-  // when no site config is shipped, never switching real users' live project.
-  if (window.FIREBASE_CONFIG?.projectId && window.FIREBASE_CONFIG?.apiKey) return window.FIREBASE_CONFIG;
-  try { return JSON.parse(localStorage.getItem("bff:fbconfig") || "null"); } catch { return null; }
-};
+
+function emitStatus() { try { window.dispatchEvent(new CustomEvent("bff:cloudstatus")); } catch (e) {} }
+function setStatus(s, msg) { CLOUD.status = s; CLOUD.message = msg || ""; emitStatus(); }
+
+function readConfig() {
+  if (window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey) return window.FIREBASE_CONFIG;
+  try { const v = JSON.parse(localStorage.getItem("bff:fbconfig") || "null"); return v && v.apiKey ? v : null; } catch (e) { return null; }
+}
 function setConfig(text) {
-  if (window.FIREBASE_CONFIG?.projectId) throw fail("bff/fixed-config");
-  const cfg = typeof text === "string" ? JSON.parse(text) : text;
-  if (!cfg?.apiKey || !cfg?.projectId) throw fail("bff/bad-config");
+  let cfg;
+  try { cfg = typeof text === "string" ? JSON.parse(text) : text; } catch (e) { throw new Error("設定 JSON 格式錯誤 / Invalid config JSON"); }
+  if (!cfg || !cfg.apiKey || !cfg.projectId) throw new Error("缺少 apiKey / projectId");
   localStorage.setItem("bff:fbconfig", JSON.stringify(cfg));
   location.reload();
 }
-function disableCloud() {
-  if (window.FIREBASE_CONFIG?.projectId) throw fail("bff/fixed-config");
-  localStorage.removeItem("bff:fbconfig"); location.reload();
-}
-async function requireAPI() { await ready; if (!api) throw fail("bff/cloud-unavailable"); return api; }
-async function identity(user, refresh = false) {
-  if (!user || user.isAnonymous) return null;
-  const token=await api.a.getIdTokenResult(user,refresh);
-  const login=access.verifiedLogin(user,token);
-  if(!login) return null;
-  const admin=access.session(user,token,window.AUTH.isAdminEmail);
-  if(admin?.role==="admin") return {...window.AUTH.ADMIN,...admin};
-  let member;
-  try {
-    const snap=await api.f.getDocFromServer(membershipRecord(login.uid));
-    if(!snap.exists()) return null;
-    member=snap.data();
-  } catch(e) {
-    if(e.code==="permission-denied") return null;
-    throw e;
+function disableCloud() { localStorage.removeItem("bff:fbconfig"); location.reload(); }
+
+// announce initial (local) status after load so UI can read it
+setTimeout(emitStatus, 0);
+
+let _api = null;        // { auth, db, fns... }
+let _signInImpl = null;
+let _signOutImpl = null;
+let _verifyingAdmin = false;
+let _readyResolve = null;
+const _ready = new Promise((resolve) => { _readyResolve = resolve; });
+function signIn() { return _signInImpl ? _signInImpl() : Promise.resolve(); }
+function signOutCloud() { return _signOutImpl ? _signOutImpl() : Promise.resolve(); }
+
+/* Admin quick sign-in via Google popup: authenticates with Firebase GoogleAuthProvider,
+   verifies that the signed-in Google account is verified and in window.AUTH.ADMIN_EMAILS,
+   and signs out immediately if unauthorized. Returns the user profile on success. */
+async function signInAdmin() {
+  await _ready;
+  if (!_api || !_api.auth || !_api.authMod) {
+    const err = new Error("Cloud sync is unavailable");
+    err.code = "cloud-unavailable";
+    throw err;
   }
-  // Firestore also enforces the same-UID, enabled exact company identity
-  // plus Google signed subject, independently of these UI checks.
-  const session=access.session(user,token,window.AUTH.isAdminEmail,member);
-  if(!session) return null;
-  const def = window.AUTH.VENDORS.find(v => v.id === session.id);
-  return {...session, name: def?.name || {zh:session.id,en:session.id}};
-}
-function tokenKey(s) { return s && [s.uid,s.role,s.id,s.email].join(":"); }
-function applySession(s) {
-  const next = tokenKey(s);
-  if (next && next === sessionKey) { emit(); return; }
-  generation++;
-  sessionKey = next || "";
-  linkPermit = null;
-  firstData = false;
-  CLOUD.readyForWrites = false;
-  listeners.forEach(unsub => unsub());
-  listeners = [];
-  clearTimeout(writeTimer);
-  CLOUD.user = s;
-  window.AUTH.set(s);
-  window.STORE.resetAccessScope();
-  status(s ? "connecting" : "signedout");
-  if (s) startSync(s, generation);
-}
-async function completeLogin(perform, role) {
-  await requireAPI();
-  manualAuth = true; tokenEvent++;
-  try {
-    const {user} = await perform();
-    const s = await identity(user, true);
-    if (api.auth.currentUser?.uid !== user.uid || signOutPending) throw fail("bff/session-changed");
-    if (!s || s.role !== role) {
-      // Keep unverified email/password users signed in *only* long enough to
-      // request the verification email; no UI access or Firestore reads.
-      if (role === "vendor" && !user.isAnonymous && !user.emailVerified && user.providerData.some(p => p.providerId === "password")) {
-        applySession(null); throw fail("bff/email-unverified");
-      }
-      await api.a.signOut(api.auth);
-      applySession(null);
-      throw fail(role === "admin" ? "bff/not-admin" : "bff/not-provisioned");
-    }
-    applySession(s); return s;
-  } finally { manualAuth = false; }
-}
-const google = () => {
-  const provider = new api.a.GoogleAuthProvider();
+  const { auth, authMod } = _api;
+  const provider = new authMod.GoogleAuthProvider();
   provider.setCustomParameters({ prompt: "select_account" });
-  return provider;
-};
-function signInAdmin() { return completeLogin(() => api.a.signInWithPopup(api.auth, google()), "admin"); }
-function signInVendor(email, password, viaGoogle = false) {
-  return completeLogin(() => viaGoogle
-    ? api.a.signInWithPopup(api.auth, google())
-    : api.a.signInWithEmailAndPassword(api.auth, String(email || "").trim(), password), "vendor");
-}
-async function requestReset(email) {
-  const {a,auth} = await requireAPI();
-  try { await a.sendPasswordResetEmail(auth, String(email || "").trim(), {url: resetURL()}); }
-  catch (e) { if (e.code !== "auth/user-not-found") throw e; } // account-neutral response
-}
-async function verifyEmail() {
-  const {a,auth} = await requireAPI();
-  if (!auth.currentUser || auth.currentUser.isAnonymous) throw fail("bff/signed-out");
-  await a.sendEmailVerification(auth.currentUser, {url:resetURL()});
-}
-function scopedVendor() {
-  const me = window.AUTH.get();
-  const user = api?.auth.currentUser;
-  if (!me || me.role !== "vendor" || user?.uid !== me.uid || user.isAnonymous || signOutPending) throw fail("bff/not-provisioned");
-  return {me,user,g:generation};
-}
-function googleSubject(token) {
-  const x=token.claims?.firebase?.identities?.["google.com"];
-  return Array.isArray(x) && x.length===1 && typeof x[0]==="string" ? x[0] : "";
-}
-function membershipRecord(uid) {
-  return api.f.doc(api.db,"bff_supplierAccounts",uid);
-}
-function requireManager() {
-  const u=window.AUTH.get();
-  if(!api || u?.role!=="admin" || api.auth.currentUser?.uid!==u.uid || !CLOUD.readyForWrites) throw fail("bff/admin-not-ready");
-}
-function verifiedUID(v) {
-  const s=String(v||"").trim();
-  if(!/^[A-Za-z0-9_-]{1,128}$/.test(s)) throw fail("bff/invalid-uid");
-  return s;
-}
-async function registerSupplier(uid,email,vendorId) {
-  requireManager();
-  const ref=membershipRecord(verifiedUID(uid));
-  const normalized=String(email||"").trim().toLowerCase();
-  if(!/^[^@\s]{1,128}@[^@\s]+\.[^@\s]+$/.test(normalized) || normalized.length>320) throw fail("bff/invalid-email");
-  if(!access.validVendor(vendorId) || !window.AUTH.VENDORS.some(v=>v.id===vendorId)) throw fail("bff/invalid-vendor");
-  await api.f.runTransaction(api.db,async tx=>{
-    if((await tx.get(ref)).exists()) throw fail("bff/registry-exists");
-    tx.set(ref,{email:normalized,vendorId,enabled:true});
-  });
-}
-async function lookupSupplier(uid) {
-  requireManager();
-  const s=await api.f.getDocFromServer(membershipRecord(verifiedUID(uid)));
-  return s.exists()?s.data():null;
-}
-async function disableSupplier(uid) {
-  requireManager();
-  await api.f.updateDoc(membershipRecord(verifiedUID(uid)),{enabled:false});
-}
-const googleRef=uid=>api.f.doc(api.db,"bff_googleLinks",uid);
-async function hasGoogleGrant(uid,sub) {
-  const snap=await api.f.getDocFromServer(googleRef(uid));
-  return snap.exists() && snap.data().googleSub===sub;
-}
-function linkedProvider(user) {
-  return user.providerData.find(p=>p.providerId==="google.com");
-}
-function googleLinked() {
-  try{return !!linkedProvider(scopedVendor().user);}catch{return false;}
-}
-async function googleLinkStatus() {
-  const {user,g}=scopedVendor();
-  const p=linkedProvider(user);
-  if(!p) return "none";
-  const active=await hasGoogleGrant(user.uid,p.uid);
-  if(!same(g)) throw fail("bff/session-changed");
-  return active?"active":"pending";
-}
-async function linkGoogle() {
-  const {me,user,g}=scopedVendor();
-  const attached=linkedProvider(user);
-  manualAuth=true; tokenEvent++;
-  // The temporary Google-authenticated phase has no grant yet; never let
-  // it consume or accidentally terminate active private listeners.
-  listeners.forEach(unsub=>unsub()); listeners=[];
-  CLOUD.readyForWrites=false;status("connecting");
+  _verifyingAdmin = true;
   try {
-    const result=attached
-      ? await api.a.reauthenticateWithPopup(user,google())
-      : await api.a.linkWithPopup(user,google());
-    const subject=linkedProvider(result.user)?.uid;
-    if (!same(g) || api.auth.currentUser?.uid !== me.uid || result.user.uid!==me.uid || !subject) throw fail("bff/session-changed");
-    linkPermit={uid:me.uid,g,subject,until:Date.now()+5*60*1000};
-  } catch(e) {
-    if(same(g)) {
-      const s=await identity(api.auth.currentUser).catch(()=>null);
-      if(s?.uid===me.uid) startSync(me,g);
+    const cred = await authMod.signInWithPopup(auth, provider);
+    const user = cred && cred.user;
+    const email = user && user.email ? user.email.trim().toLowerCase() : "";
+    const allowed = !!(window.AUTH && window.AUTH.isAdminEmail && window.AUTH.isAdminEmail(email));
+    if (!user || !user.emailVerified || !allowed) {
+      _verifyingAdmin = false;
+      try { await authMod.signOut(auth); } catch (e) {}
+      const err = new Error("Not an authorized admin account");
+      err.code = "bff/not-admin";
+      err.email = email;
+      throw err;
     }
+    const profile = { name: user.displayName, email: user.email, photo: user.photoURL };
+    CLOUD.user = profile;
+    _verifyingAdmin = false;
+    setStatus("online");
+    return profile;
+  } catch (e) {
+    _verifyingAdmin = false;
     throw e;
-  } finally {manualAuth=false;}
-}
-async function confirmLinkPassword(password) {
-  const {me,user,g}=scopedVendor();
-  if(!linkPermit || linkPermit.uid!==me.uid || linkPermit.g!==g || Date.now()>linkPermit.until) throw fail("bff/reauth-required");
-  const permit=linkPermit;
-  manualAuth=true;tokenEvent++;
-  try {
-    await api.a.reauthenticateWithCredential(user,api.a.EmailAuthProvider.credential(me.email,password));
-    const token=await api.a.getIdTokenResult(user,true);
-    if(!same(g) || api.auth.currentUser?.uid!==me.uid || token.signInProvider!=="password" || googleSubject(token)!==permit.subject) throw fail("bff/session-changed");
-    const ref=googleRef(me.uid);
-    if(!await hasGoogleGrant(me.uid,permit.subject)) await api.f.setDoc(ref,{googleSub:permit.subject});
-    if(!same(g) || api.auth.currentUser?.uid!==me.uid) throw fail("bff/session-changed");
-    linkPermit=null;
-    startSync(me,g);
-  } finally {manualAuth=false;}
-}
-async function signOutCloud() {
-  signOutPending = true;
-  tokenEvent++;
-  applySession(null);
-  try { if (api?.auth.currentUser) await api.a.signOut(api.auth); }
-  finally { signOutPending = false; }
+  }
 }
 
-const ids = n => n > 0 && n < 445 && Number.isSafeInteger(n);
-const textBytes = s => new TextEncoder().encode(s).length;
-function chunk(data) {
-  const json = JSON.stringify(data);
-  const parts = [];
-  let i=0;
-  while (i < json.length) {
-    // Any UTF-16 code unit is at most 3 bytes; avoid cutting a surrogate pair.
-    let end = Math.min(i+260000,json.length);
-    if (end < json.length && /^[\uD800-\uDBFF]$/.test(json[end-1])) end--;
-    parts.push(json.slice(i,end)); i=end;
-  }
-  return {json,parts};
-}
-function masterRef() { return api.f.doc(api.db,"bff","data"); }
-function catalogRef() { return api.f.doc(api.db,"bff_catalog","data"); }
-function projectsRef(vid) { return api.f.doc(api.db,"bff_vendorProjects",vid); }
-function documentPart(ref,i) {
-  const {db,f}=api;
-  if (ref.path === "bff/data") return f.doc(db,"bff","data_"+i); // existing legacy shape
-  if (ref.path === "bff_catalog/data") return f.doc(db,"bff_catalog","data_"+i);
-  return f.doc(ref,"chunks","data_"+i);
-}
-function stageView(batch,ref,data) {
-  const {json,parts} = chunk(data);
-  if (textBytes(json) > 9_000_000) throw fail("bff/data-too-large");
-  if (textBytes(json) < 800_000) { batch.set(ref,data); return 1; }
-  if (!ids(parts.length)) throw fail("bff/data-too-large");
-  batch.set(ref,{_rev:data._rev,chunked:true,chunks:parts.length});
-  parts.forEach((s,i)=>batch.set(documentPart(ref,i),{_rev:data._rev,i,s}));
-  return parts.length + 1;
-}
-async function readView(ref, meta) {
-  if (!meta.chunked) return meta;
-  if (!ids(meta.chunks)) throw fail("bff/bad-project-data");
-  const parts = await Promise.all(Array.from({length:meta.chunks},(_,i)=>api.f.getDocFromServer(documentPart(ref,i))));
-  return JSON.parse(parts.map((snap,i)=>{
-    const d=snap.exists() && snap.data();
-    if (!d || d.i !== i || d._rev !== meta._rev || typeof d.s !== "string") throw fail("bff/snapshot-mismatch");
-    return d.s;
-  }).join(""));
-}
-let lastMasterRev=0;
-let priorProjections=null;
-function safeMaster(data) {
-  const {adminCode,sheetsConfig,...clean} = data;
-  return {...clean,vendors:(clean.vendors || []).map(v=>({id:v.id,name:v.name}))};
-}
-async function saveAdmin(g, force = false) {
-  if (!same(g) || window.AUTH.get()?.role !== "admin" || !firstData) throw fail("bff/admin-not-ready");
-  const raw = safeMaster(window.STORE.snapshotData());
-  const rev = Math.max(lastMasterRev+1,Date.now());
-  if(!force) lastMasterRev=rev;
-  raw._rev=rev;
-  const batch = api.f.writeBatch(api.db);
-  let count=force ? 0 : stageView(batch,masterRef(),raw);
-  const next = {catalog:access.catalogSnapshot(raw), projects:new Map()};
-  const prev = priorProjections;
-  const prevProjects = prev?.projects || new Map();
-  if (force || !prev || JSON.stringify(prev.catalog)!==JSON.stringify(next.catalog)) count+=stageView(batch,catalogRef(),{...next.catalog,_rev:rev});
-  const active = new Set(raw.vendors.map(v=>v.id).filter(access.validVendor));
-  for (const id of new Set([...active,...prevProjects.keys()])) {
-    const data = access.vendorProjectSnapshot(raw,id);
-    if (active.has(id)) next.projects.set(id,data);
-    if (force || JSON.stringify(prevProjects.get(id))!==JSON.stringify(data)) count+=stageView(batch,projectsRef(id),{...data,_rev:rev});
-  }
-  if (count > 440) throw fail("bff/too-many-projections");
-  await batch.commit();
-  if (same(g)) priorProjections=next;
-}
-async function publishSupplierViews() { return saveAdmin(generation,true); }
-function syncFailure(e,g) {
-  if(!same(g)) return;
-  if(e.code==="permission-denied" && window.AUTH.get()?.role==="vendor") {
-    signOutCloud().catch(()=>{});
-    status("error","供應商權限停止或尚未開通 / Supplier access is not available.");
-    return;
-  }
-  status("error",e.message);
-}
-function subscribeView(ref,g,onView,onAbsent) {
-  let serial=0;
-  listeners.push(api.f.onSnapshot(ref, {includeMetadataChanges:true},async snap=>{
-    if (!same(g) || snap.metadata.hasPendingWrites || snap.metadata.fromCache) return;
-    const seq=++serial;
-    if (!snap.exists()) { onAbsent?.(); return; }
-    try {
-      const meta=snap.data();
-      if (ref.path==="bff/data" && (meta._rev || 0) < lastMasterRev) return;
-      const d=await readView(ref,meta);
-      if (same(g) && seq===serial) onView(d);
-    } catch(e) { if (seq===serial) syncFailure(e,g); }
-  },e=>syncFailure(e,g)));
-}
-function startSync(me,g) {
-  const f=api.f, db=api.db;
-  const isAdmin=me.role==="admin";
-  priorProjections=null; lastMasterRev=0;
-  const pending=new Set(isAdmin ? ["master"] : ["catalog","projects","stock","report","stepphoto"]);
-  const mark=key=>{
-    pending.delete(key);
-    if (!pending.size && same(g)) { CLOUD.readyForWrites=true; status("online"); }
-  };
-  if (isAdmin) {
-    subscribeView(masterRef(),g,data=>{
-      if ((data._rev || 0) < lastMasterRev) return;
-      lastMasterRev=data._rev || 0;
-      firstData=true;
-      window.STORE.hydrate(safeMaster(data));
-      mark("master");
-    },()=>{firstData=true;mark("master");}); // never seed/overwrite production implicitly
-  } else {
-    subscribeView(membershipRecord(me.uid),g,d=>{
-      if(d.enabled!==true || d.vendorId!==me.id || d.email!==me.email) {
-        syncFailure({code:"permission-denied",message:"Supplier access disabled"},g);
+(async function init() {
+  const cfg = readConfig();
+  CLOUD.configured = !!cfg;
+  if (!cfg) { setStatus("local"); _readyResolve(); return; }
+  CLOUD.enabled = true;
+  setStatus("connecting");
+  try {
+    const appMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js");
+    const authMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js");
+    const fsMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
+    const app = appMod.initializeApp(cfg);
+    const auth = authMod.getAuth(app);
+    const db = fsMod.getFirestore(app);
+    _api = { app, auth, db, authMod, fsMod };
+    // Firebase Storage is intentionally disabled to avoid Storage billing;
+    // image hosting is handled by storage.js (GitHub repo WebP or inline WebP data-URI).
+    CLOUD.storage = null;
+    CLOUD.stMod = null;
+
+    const provider = new authMod.GoogleAuthProvider();
+    _signInImpl = () => authMod.signInWithPopup(auth, provider).catch((e) => setStatus("error", e.message));
+    _signOutImpl = () => authMod.signOut(auth);
+
+    // Role-aware cloud connection:
+    //  - Admin signs in with Google (button) -> can edit master data.
+    //  - Everyone else (vendors AND the login screen itself) connects SILENTLY
+    //    as an anonymous user, so the latest vendor list / access codes are
+    //    pulled BEFORE login and vendor stock-takes reach the cloud.
+    function roleIsAdmin() {
+      const u = window.AUTH && window.AUTH.get && window.AUTH.get();
+      return !!(u && u.role === "admin");
+    }
+    function maybeAnonSignIn() {
+      if (auth.currentUser) return;       // already connected
+      if (roleIsAdmin()) return;          // admin waits for the Google button
+      authMod.signInAnonymously(auth).catch((e) => setStatus("error", e.message));
+    }
+
+    authMod.onAuthStateChanged(auth, (user) => {
+      if (_verifyingAdmin) return;
+      // An admin must NOT stay on an anonymous connection: Firestore rejects
+      // master-data writes from anyone but the Google admin, which would make
+      // edits (e.g. add vendor) silently fail. Drop anon admins to local-only.
+      if (user && user.isAnonymous && roleIsAdmin()) {
+        authMod.signOut(auth);
+        return;
       }
-    },()=>syncFailure({code:"permission-denied",message:"Supplier access disabled"},g));
-    subscribeView(catalogRef(),g,d=>{
-      window.STORE.hydrate(access.catalogSnapshot(d)); mark("catalog");
-    },()=>mark("catalog"));
-    subscribeView(projectsRef(me.id),g,d=>{
-      const view={vendors:d.vendor ? [d.vendor] : [],testcodes:Array.isArray(d.testcodes)?d.testcodes:[]};
-      window.STORE.hydrate(view); mark("projects");
-    },()=>{ window.STORE.hydrate({vendors:[], testcodes:[]}); mark("projects"); });
-  }
-  const all = {...vendorCollections, ...(isAdmin ? {loginlog:"bff_loginlog"} : {})};
-  for (const [kind,collection] of Object.entries(all)) {
-    const ref = isAdmin ? f.collection(db,collection) : f.doc(db,collection,me.id);
-    let gotServer=false;
-    listeners.push(f.onSnapshot(ref,{includeMetadataChanges:true},snap=>{
-      if (!same(g) || snap.metadata.hasPendingWrites || snap.metadata.fromCache) return;
-      if (isAdmin && !gotServer) snap.docs.forEach(c=>window.AUTH.cache.write(kind,c.id,c.data()));
-      else if (isAdmin) snap.docChanges().forEach(c=>window.AUTH.cache.write(kind,c.doc.id,c.type==="removed"?{}:c.doc.data()));
-      else window.AUTH.cache.write(kind,me.id,snap.exists()?snap.data():{});
-      gotServer=true;
-      window.dispatchEvent(new CustomEvent("bff:"+kind+"change"));
-      if (!isAdmin) mark(kind);
-    },e=>syncFailure(e,g)));
-  }
-}
-function vendorRef(kind,vid) {
-  const {me}=scopedVendor();
-  if (me.id !== vid || !CLOUD.readyForWrites || !vendorCollections[kind]) throw fail("bff/vendor-not-ready");
-  return api.f.doc(api.db,vendorCollections[kind],vid);
-}
-async function writeCell(kind,vid,key,value) {
-  const ref=vendorRef(kind,vid);
-  if (!key || [ "__proto__", "constructor", "prototype" ].includes(key)) throw fail("bff/bad-field");
-  const f=api.f;
-  await f.setDoc(ref,{[key]:value === undefined ? f.deleteField() : value},{mergeFields:[new f.FieldPath(key)]});
-}
-async function appendAnomaly(vid,record) {
-  const ref=vendorRef("report",vid);
-  const f=api.f;
-  await f.setDoc(ref,{__anomalies:f.arrayUnion(record)},{merge:true});
-}
-for (const kind of Object.keys(vendorCollections)) {
-  window.addEventListener("bff:"+kind+"write",e=>{
-    const g=generation;
-    const {vendorId,key,value}=e.detail || {};
-    writeCell(kind,vendorId,key,value).catch(ex=>{if(same(g)) status("error",ex.message);});
-  });
-}
-window.addEventListener("bff:datachange",()=>{
-  if (window.STORE.isApplyingRemote() || window.AUTH.get()?.role!=="admin" || !firstData) return;
-  const g=generation;
-  clearTimeout(writeTimer);
-  writeTimer=setTimeout(()=>saveAdmin(g).catch(e=>syncFailure(e,g)),800);
-});
+      CLOUD.user = user
+        ? (user.isAnonymous ? { anon: true } : { name: user.displayName, email: user.email, photo: user.photoURL })
+        : null;
+      if (user) { setStatus("online"); startSync(); }
+      else { setStatus("signedout"); stopSync(); maybeAnonSignIn(); }
+    });
 
-(async()=>{
-  const config=readConfig();
-  CLOUD.configured=!!config;
-  if (!config) { releaseReady(); return; }
-  CLOUD.enabled=true;
-  try {
-    const [appMod,a,f]=await Promise.all([
-      import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js"),
-      import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js"),
-      import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"),
-    ]);
-    const app=appMod.initializeApp(config);
-    const auth=a.getAuth(app);
-    await a.setPersistence(auth,a.browserSessionPersistence);
-    const db=f.initializeFirestore(app,{localCache:f.memoryLocalCache()});
-    api={a,f,auth,db};
-    let first=true;
-    a.onIdTokenChanged(auth,async user=>{
-      if (first) { first=false; releaseReady(); }
-      if (manualAuth || signOutPending) return;
-      const event=++tokenEvent;
-      try {
-        const s=await identity(user);
-        if (event!==tokenEvent || manualAuth || signOutPending || api.auth.currentUser?.uid!==user?.uid) return;
-        applySession(s);
-      } catch(e) { if (event===tokenEvent) { applySession(null); status("error",e.message); } }
-    },e=>{if(first){first=false;releaseReady();} status("error",e.message);});
-  } catch(e) { api=null; releaseReady(); status("error",e.message); }
+    // When the local user switches (login / logout / vendor pick), rebind the
+    // sync so the correct role-based behaviour is active.
+    window.addEventListener("bff:authchange", function () {
+      const u = window.AUTH && window.AUTH.get && window.AUTH.get();
+      // Admin signed out of the app -> also sign out the Google Firebase session
+      // so the login screen cleanly returns to anonymous read-only sync.
+      if (!u && auth.currentUser && !auth.currentUser.isAnonymous) {
+        authMod.signOut(auth);
+        return;
+      }
+      // Admin on an anonymous session -> go local-only (no rejected writes).
+      if (auth.currentUser && auth.currentUser.isAnonymous && roleIsAdmin()) {
+        authMod.signOut(auth);
+        return;
+      }
+      if (auth.currentUser) { stopSync(); startSync(); }
+      else maybeAnonSignIn();
+    });
+    _readyResolve();
+    maybeAnonSignIn();
+  } catch (e) {
+    setStatus("error", e && e.message ? e.message : String(e));
+    _readyResolve();
+  }
 })();
+
+/* ---- sync engine ---- */
+let _unsubData = null, _unsubStock = null, _unsubReport = null, _unsubLoginLog = null, _unsubStepPhoto = null, _writeTimer = null;
+/* Guard against a real race: our own debounced write (800ms) can be beaten by
+   a late/out-of-order remote snapshot carrying OLDER data, which would
+   silently revert an edit the admin just made (e.g. a version/name change)
+   before the local write even goes out. Every push is stamped with a
+   monotonic `_rev`; incoming snapshots older than the last rev WE know about
+   are ignored instead of blindly overwriting local state. */
+let _lastRev = 0;
+
+/* ---- master-doc chunking ----
+   Firestore caps ANY single document at 1,048,576 bytes. The master snapshot
+   (all items + libraries + product photos as data-URIs) can exceed that. So
+   instead of one `bff/data` doc we may split the serialized snapshot across
+   several docs:
+     bff/data        = { _rev, chunked:true, chunks:N }   (small meta)
+     bff/data_0..N-1 = { _rev, i, s:<slice of JSON string> }
+   When the payload is small we keep the legacy single inline doc (no `chunked`
+   flag) so old readers still work. Reassembly requires every chunk present and
+   sharing the meta's _rev, else we wait for the next consistent snapshot. */
+const CHUNK_CHARS = 700000; // ~700 KB per chunk doc, safely under the 1 MB cap
+function chunkSafe(json) {
+  const parts = [];
+  let i = 0;
+  while (i < json.length) {
+    let end = Math.min(i + CHUNK_CHARS, json.length);
+    if (end < json.length) {
+      const code = json.charCodeAt(end - 1); // never split a surrogate pair (emoji)
+      if (code >= 0xD800 && code <= 0xDBFF) end--;
+    }
+    parts.push(json.slice(i, end));
+    i = end;
+  }
+  return parts;
+}
+function writeMaster(data) {
+  const { db, fsMod } = _api;
+  const json = JSON.stringify(data);
+  const dataRef = fsMod.doc(db, "bff", "data");
+  if (json.length <= 900000) {
+    // small enough for one doc — legacy inline format
+    return fsMod.setDoc(dataRef, data);
+  }
+  const parts = chunkSafe(json);
+  const batch = fsMod.writeBatch(db);
+  batch.set(dataRef, { _rev: data._rev || 0, chunked: true, chunks: parts.length, ts: Date.now() });
+  parts.forEach((s, i) => batch.set(fsMod.doc(db, "bff", "data_" + i), { _rev: data._rev || 0, i: i, s: s }));
+  return batch.commit();
+}
+async function readMaster(meta) {
+  if (!meta || !meta.chunked) return meta; // legacy inline doc IS the data
+  const { db, fsMod } = _api;
+  const gets = [];
+  for (let i = 0; i < meta.chunks; i++) gets.push(fsMod.getDoc(fsMod.doc(db, "bff", "data_" + i)));
+  const snaps = await Promise.all(gets);
+  let json = "";
+  for (let i = 0; i < meta.chunks; i++) {
+    const s = snaps[i];
+    if (!s.exists()) throw new Error("missing chunk " + i);
+    const d = s.data();
+    if ((d._rev || 0) !== (meta._rev || 0)) throw new Error("chunk rev mismatch");
+    json += d.s || "";
+  }
+  return JSON.parse(json);
+}
+function startSync() {
+  stopSync();
+  const { db, fsMod } = _api;
+  const dataRef = fsMod.doc(db, "bff", "data");
+
+  // 1) initial pull (or seed if cloud empty — admin only, vendors can't write master data)
+  fsMod.getDoc(dataRef).then(async (snap) => {
+    if (snap.exists()) {
+      const meta = snap.data();
+      if ((meta._rev || 0) >= _lastRev) {
+        try { const d = await readMaster(meta); _lastRev = meta._rev || _lastRev; window.STORE.hydrate(d); }
+        catch (e) { /* incomplete/mid-write chunk set — a later snapshot will be consistent */ }
+      }
+    } else {
+      const u = window.AUTH && window.AUTH.get && window.AUTH.get();
+      if (u && u.role === "admin") {
+        const seed = window.STORE.snapshotData();
+        seed._rev = ++_lastRev;
+        writeMaster(seed).catch((e) => setStatus("error", e.message));
+      }
+    }
+  }).catch((e) => setStatus("error", e.message));
+
+  // 2) subscribe to remote data changes
+  _unsubData = fsMod.onSnapshot(dataRef, async (snap) => {
+    if (!snap.exists()) return;
+    if (snap.metadata.hasPendingWrites) return; // ignore our own optimistic write
+    const meta = snap.data();
+    if ((meta._rev || 0) < _lastRev) return; // stale/out-of-order — do not clobber a newer local edit
+    try {
+      const d = await readMaster(meta);
+      if ((meta._rev || 0) < _lastRev) return; // re-check after async chunk fetch
+      _lastRev = meta._rev || _lastRev;
+      window.STORE.hydrate(d);
+    } catch (e) { /* chunks not all present yet — wait for the next snapshot */ }
+  }, (e) => setStatus("error", e.message));
+
+  // 3) subscribe to vendor stock docs.
+  //    Admin watches ALL vendors (for the overview + notifications);
+  //    a vendor watches only their OWN doc.
+  const me = window.AUTH && window.AUTH.get && window.AUTH.get();
+  if (me && me.role === "admin") {
+    _unsubStock = fsMod.onSnapshot(fsMod.collection(db, "bff_stock"), (qs) => {
+      qs.docChanges().forEach((ch) => {
+        if (ch.doc.metadata.hasPendingWrites) return;
+        try { localStorage.setItem("bff:stock:" + ch.doc.id, JSON.stringify(ch.doc.data())); } catch (e) {}
+      });
+      window.dispatchEvent(new CustomEvent("bff:stockchange"));
+    }, (e) => setStatus("error", e.message));
+  } else if (me) {
+    _unsubStock = fsMod.onSnapshot(fsMod.doc(db, "bff_stock", me.id), (snap) => {
+      if (snap.metadata.hasPendingWrites) return;
+      if (snap.exists()) { try { localStorage.setItem("bff:stock:" + me.id, JSON.stringify(snap.data())); } catch (e) {} }
+      window.dispatchEvent(new CustomEvent("bff:stockchange"));
+    }, (e) => setStatus("error", e.message));
+  }
+
+  // 3b) subscribe to vendor report docs (same role split as stock).
+  if (me && me.role === "admin") {
+    _unsubReport = fsMod.onSnapshot(fsMod.collection(db, "bff_report"), (qs) => {
+      qs.docChanges().forEach((ch) => {
+        if (ch.doc.metadata.hasPendingWrites) return;
+        try { window.bffReportPut(ch.doc.id, ch.doc.data()); } catch (e) {}
+      });
+      window.dispatchEvent(new CustomEvent("bff:reportchange"));
+    }, (e) => setStatus("error", e.message));
+  } else if (me) {
+    _unsubReport = fsMod.onSnapshot(fsMod.doc(db, "bff_report", me.id), (snap) => {
+      if (snap.metadata.hasPendingWrites) return;
+      if (snap.exists()) { try { window.bffReportPut(me.id, snap.data()); } catch (e) {} }
+      window.dispatchEvent(new CustomEvent("bff:reportchange"));
+    }, (e) => setStatus("error", e.message));
+  }
+
+  // 3c) subscribe to vendor login-log docs (admin only — vendors don't need to read this back).
+  if (me && me.role === "admin") {
+    _unsubLoginLog = fsMod.onSnapshot(fsMod.collection(db, "bff_loginlog"), (qs) => {
+      qs.docChanges().forEach((ch) => {
+        if (ch.doc.metadata.hasPendingWrites) return;
+        const d = ch.doc.data() || {};
+        try { localStorage.setItem("bff:loginlog:" + ch.doc.id, JSON.stringify(d.entries || [])); } catch (e) {}
+      });
+      window.dispatchEvent(new CustomEvent("bff:loginlogchange"));
+    }, (e) => setStatus("error", e.message));
+  }
+
+  // 3d) subscribe to vendor step-comparison-photo docs (same role split as stock/report).
+  //     Admin gets read-only visibility into every vendor's submissions; a
+  //     vendor only pulls their own (and never writes anyone else's).
+  if (me && me.role === "admin") {
+    _unsubStepPhoto = fsMod.onSnapshot(fsMod.collection(db, "bff_stepphoto"), (qs) => {
+      qs.docChanges().forEach((ch) => {
+        if (ch.doc.metadata.hasPendingWrites) return;
+        try { window.STORE.stepphoto_putMap(ch.doc.id, ch.doc.data()); } catch (e) {}
+      });
+      window.dispatchEvent(new CustomEvent("bff:stepphotochange"));
+    }, (e) => setStatus("error", e.message));
+  } else if (me) {
+    _unsubStepPhoto = fsMod.onSnapshot(fsMod.doc(db, "bff_stepphoto", me.id), (snap) => {
+      if (snap.metadata.hasPendingWrites) return;
+      if (snap.exists()) { try { window.STORE.stepphoto_putMap(me.id, snap.data()); } catch (e) {} }
+      window.dispatchEvent(new CustomEvent("bff:stepphotochange"));
+    }, (e) => setStatus("error", e.message));
+  }
+
+  // 4) push local data changes (debounced)
+  window.addEventListener("bff:datachange", onLocalData);
+  // 5) push local stock changes for the active vendor
+  window.addEventListener("bff:stockchange", onLocalStock);
+  // 6) push local report changes for the active vendor
+  window.addEventListener("bff:reportchange", onLocalReport);
+  // 7) push local login-log changes for the active vendor (fires on login + once IP resolves)
+  window.addEventListener("bff:loginlogchange", onLocalLoginLog);
+  if (me && me.role !== "admin") onLocalLoginLog(); // push any login recorded before this connection was ready
+  // 8) push local step-comparison-photo changes for the active vendor
+  window.addEventListener("bff:stepphotochange", onLocalStepPhoto);
+}
+function stopSync() {
+  if (_unsubData) { _unsubData(); _unsubData = null; }
+  if (_unsubStock) { _unsubStock(); _unsubStock = null; }
+  if (_unsubReport) { _unsubReport(); _unsubReport = null; }
+  if (_unsubLoginLog) { _unsubLoginLog(); _unsubLoginLog = null; }
+  if (_unsubStepPhoto) { _unsubStepPhoto(); _unsubStepPhoto = null; }
+  window.removeEventListener("bff:datachange", onLocalData);
+  window.removeEventListener("bff:stockchange", onLocalStock);
+  window.removeEventListener("bff:reportchange", onLocalReport);
+  window.removeEventListener("bff:loginlogchange", onLocalLoginLog);
+  window.removeEventListener("bff:stepphotochange", onLocalStepPhoto);
+}
+function onLocalData() {
+  if (window.STORE.isApplyingRemote()) return;
+  const u = window.AUTH && window.AUTH.get && window.AUTH.get();
+  if (!u || u.role !== "admin") return; // only admin pushes master data
+  // Bump the revision NOW (synchronously, before the debounce/write even
+  // fires) so any remote snapshot that arrives while our write is in flight
+  // is recognized as stale and ignored rather than reverting this edit.
+  const myRev = ++_lastRev;
+  clearTimeout(_writeTimer);
+  _writeTimer = setTimeout(() => {
+    const { db, fsMod } = _api;
+    const data = window.STORE.snapshotData();
+    data._rev = myRev;
+    // Firestore caps any ONE document at 1,048,576 bytes; we split the payload
+    // across several docs (writeMaster) so the whole dataset is no longer
+    // bounded by that. Keep a generous outer guard for the batch total (~9 MB).
+    let size = 0;
+    try { size = new Blob([JSON.stringify(data)]).size; } catch (e) { try { size = JSON.stringify(data).length; } catch (e2) {} }
+    if (size > 9000000) {
+      setStatus("error", "資料過大（>9MB），無法同步。請到「管理 → 備份」壓縮圖片，或移除部分大圖。 / Dataset too large (>9MB) to sync — compress or remove large images.");
+      return;
+    }
+    writeMaster(data).catch((e) => setStatus("error", e.message));
+  }, 800);
+}
+function onLocalStock() {
+  if (window.STORE.isApplyingRemote()) return;
+  const u = window.AUTH && window.AUTH.get && window.AUTH.get();
+  if (!u || u.role === "admin") return; // only vendors write their own stock
+  const { db, fsMod } = _api;
+  let map = {};
+  try { map = JSON.parse(localStorage.getItem("bff:stock:" + u.id) || "{}"); } catch (e) {}
+  fsMod.setDoc(fsMod.doc(db, "bff_stock", u.id), map).catch((e) => setStatus("error", e.message));
+}
+function onLocalReport() {
+  if (window.STORE.isApplyingRemote()) return;
+  const u = window.AUTH && window.AUTH.get && window.AUTH.get();
+  if (!u || u.role === "admin") return; // only vendors write their own reports
+  const { db, fsMod } = _api;
+  let map = {};
+  try { map = (window.bffReportGet && window.bffReportGet(u.id)) || JSON.parse(localStorage.getItem("bff:report:" + u.id) || "{}"); } catch (e) {}
+  fsMod.setDoc(fsMod.doc(db, "bff_report", u.id), map).catch((e) => setStatus("error", e.message));
+}
+function onLocalLoginLog() {
+  const u = window.AUTH && window.AUTH.get && window.AUTH.get();
+  if (!u || u.role === "admin") return; // only vendors push their own login log
+  const { db, fsMod } = _api;
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem("bff:loginlog:" + u.id) || "[]"); } catch (e) {}
+  fsMod.setDoc(fsMod.doc(db, "bff_loginlog", u.id), { entries: list }).catch((e) => setStatus("error", e.message));
+}
+function onLocalStepPhoto() {
+  if (window.STORE.isApplyingRemote()) return;
+  const u = window.AUTH && window.AUTH.get && window.AUTH.get();
+  if (!u || u.role === "admin") return; // only vendors write their own comparison photos
+  const { db, fsMod } = _api;
+  let map = {};
+  try { map = (window.STORE.stepphoto_mapForVendor && window.STORE.stepphoto_mapForVendor(u.id)) || JSON.parse(localStorage.getItem("bff:stepphoto:" + u.id) || "{}"); } catch (e) {}
+  fsMod.setDoc(fsMod.doc(db, "bff_stepphoto", u.id), map).catch((e) => setStatus("error", e.message));
+}

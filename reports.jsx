@@ -5,17 +5,70 @@
    Photos are downscaled to keep each vendor doc within Firestore's ~1MB limit. */
 const { useState: rpState, useEffect: rpEffect, useRef: rpRef } = React;
 
-/* Private records never hydrate the previous browser account's disk cache. */
+/* ---- storage (per vendor, persisted) ----
+   Reports carry photos (base64 data-URIs) which quickly blow past
+   localStorage's ~5MB per-origin cap → QuotaExceededError → "空間不足".
+   So we store in IndexedDB (window.KV, hundreds of MB) exactly like the main
+   store: an in-memory cache serves synchronous reads (render), writes go
+   through to IDB, and legacy localStorage docs are migrated on boot. */
 function reportKeyFor(vendorId) { return "bff:report:" + (vendorId || "anon"); }
-function loadReports(vid) { return window.AUTH.cache.read("report", vid); }
-function saveReports(vid, obj) { return window.AUTH.cache.write("report", vid, obj); }
-window.bffReportGet = loadReports;
-window.bffReportPut = saveReports;
+const _rptCache = {};              // vendorId -> report map (authoritative in memory)
+const _rptUseIDB = !!(window.KV && window.KV.available);
+function _rptLoadLS(vid) {
+  try { return JSON.parse(localStorage.getItem(reportKeyFor(vid)) || "{}"); } catch (e) { return {}; }
+}
+function _rptSaveLS(vid, obj) {
+  try { localStorage.setItem(reportKeyFor(vid), JSON.stringify(obj)); }
+  catch (e) { try { window.dispatchEvent(new CustomEvent("bff:saveerror", { detail: { key: reportKeyFor(vid), error: String(e && e.name || e) } })); } catch (e2) {} }
+}
+function loadReports(vendorId) {
+  const vid = vendorId || "anon";
+  if (_rptCache[vid]) return _rptCache[vid];
+  const v = _rptLoadLS(vid);       // sync fallback until IDB hydrates
+  _rptCache[vid] = v;
+  return v;
+}
+function saveReports(vendorId, obj) {
+  const vid = vendorId || "anon";
+  _rptCache[vid] = obj;
+  if (_rptUseIDB) {
+    window.KV.set(reportKeyFor(vid), obj).catch(() => _rptSaveLS(vid, obj));
+    try { localStorage.removeItem(reportKeyFor(vid)); } catch (e) {}
+  } else { _rptSaveLS(vid, obj); }
+}
+/* async: hydrate every vendor's reports from IDB (authoritative) and migrate
+   any legacy localStorage report docs into IDB, then refresh the UI. */
+(async function hydrateReports() {
+  if (!_rptUseIDB) return;
+  try {
+    const ks = (window.KV.keys ? await window.KV.keys() : []) || [];
+    for (const k of ks) {
+      if (k.indexOf("bff:report:") === 0) {
+        const v = await window.KV.get(k);
+        if (v) _rptCache[k.slice("bff:report:".length)] = v;
+      }
+    }
+    for (let i = 0; i < localStorage.length; i++) {   // migrate legacy LS → IDB
+      const k = localStorage.key(i);
+      if (k && k.indexOf("bff:report:") === 0) {
+        const vid = k.slice("bff:report:".length);
+        if (!_rptCache[vid]) {
+          const v = _rptLoadLS(vid);
+          if (v && Object.keys(v).length) { _rptCache[vid] = v; window.KV.set(k, v).catch(() => {}); }
+        }
+      }
+    }
+    window.dispatchEvent(new CustomEvent("bff:reportchange"));
+  } catch (e) {}
+})();
+
+/* Accessors for cloud.js so report sync reads/writes the IDB-backed source
+   (not the now-emptied localStorage). Upload reads bffReportGet; a remote pull
+   applies via bffReportPut (persists to cache + IDB). */
+window.bffReportGet = function (vendorId) { return loadReports(vendorId); };
+window.bffReportPut = function (vendorId, map) { saveReports(vendorId, map || {}); };
 function getReport(vendorId, testId) { return loadReports(vendorId)[testId]; }
-async function setReport(vendorId,testId,report) {
-  const uid=window.AUTH.get()?.uid;
-  await window.CLOUD.writeReport(vendorId,testId,report == null ? undefined : report);
-  if (!uid || window.AUTH.get()?.uid!==uid) return;
+function setReport(vendorId, testId, report) {
   const all = loadReports(vendorId);
   if (report == null) delete all[testId];
   else all[testId] = report;
@@ -103,27 +156,24 @@ function ReportPanel({ item, lang, t, vendor, admin, onZoom }) {
     setPhotos(photos.filter((_, j) => j !== i)); dirty();
   }
 
-  async function submit() {
-    if (busy||!window.CLOUD?.readyForWrites) return;
+  function submit() {
     const report = {
       result, values: values.trim(), note: note.trim(), photos,
-      by: {zh:vendor.email,en:vendor.email}, at: Date.now(),
+      by: vendor ? vendor.name : { zh: "—", en: "—" }, at: Date.now(),
     };
-    setBusy(true);setUploadErr("");
-    try { await setReport(vid,item.id,report);setSaved(true); }
-    catch(e){setUploadErr(lang==="zh"?"雲端未確認儲存，請檢查連線後重試。":"Cloud save was not confirmed. Check the connection and retry.");}
-    finally{setBusy(false);}
+    setReport(vid, item.id, report);
+    if (window.SHEETS && window.SHEETS.pushReport) {
+      window.SHEETS.pushReport(vendor, item, report);
+    }
+    setSaved(true);
   }
-  async function clearReport() {
-    if(busy||!window.CLOUD?.readyForWrites)return;
-    setBusy(true);setUploadErr("");
-    try {await setReport(vid,item.id,null);setResult("");setValues("");setNote("");setPhotos([]);setSaved(false);}
-    catch(e){setUploadErr(lang==="zh"?"清除未確認，請稍後再試。":"Clear was not confirmed; please retry.");}
-    finally{setBusy(false);}
+  function clearReport() {
+    setReport(vid, item.id, null);
+    setResult(""); setValues(""); setNote(""); setPhotos([]); setSaved(false);
   }
 
   const hasContent = !!(values.trim() || note.trim() || photos.length);
-  const canSubmit = !!result && !busy && !!window.CLOUD?.readyForWrites;
+  const canSubmit = !!result;
 
   return (
     <div className="report">

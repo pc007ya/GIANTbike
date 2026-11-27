@@ -1,137 +1,51 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // ── 管理員 email（大小寫不拘）。要換人或多位管理員就加進這個清單。 ──
     function isAdmin() {
       return request.auth != null
         && request.auth.token.email_verified == true
-        && request.auth.token.firebase.sign_in_provider == 'google.com'
-        && request.auth.token.email.lower() in ['pc007ya@gmail.com'];
+        && request.auth.token.email.lower() in [
+             'pc007ya@gmail.com'
+           ];
+    }
+    // 任何已登入者（含供應商的匿名連線）
+    function signedIn() {
+      return request.auth != null;
     }
 
-    function validAccount(data) {
-      return data.keys().hasOnly(['email', 'vendorId', 'enabled'])
-        && data.email is string
-        && data.email.size() <= 320
-        && data.email.lower() == data.email
-        && data.email.matches('^[^ @]+@[^ @]+[.][^ @]+$')
-        && !(data.email in ['pc007ya@gmail.com'])
-        && data.vendorId is string
-        && data.vendorId.matches('^[a-z0-9][a-z0-9_-]{0,63}$')
-        && !(data.vendorId in ['admin', 'anon', 'anonymous'])
-        && data.enabled is bool;
-    }
-
-    function verifiedEmail() {
-      return request.auth != null
-        && request.auth.token.email_verified == true
-        && request.auth.token.email is string;
-    }
-
-    function passwordSignIn() {
-      return request.auth.token.firebase.sign_in_provider == 'password';
-    }
-
-    function supportedProvider() {
-      return passwordSignIn() || request.auth.token.firebase.sign_in_provider == 'google.com';
-    }
-
-    function activeAccount(data) {
-      return validAccount(data) && data.enabled == true
-        && data.email == request.auth.token.email.lower();
-    }
-
-    function supplierRecord() {
-      return get(/databases/$(database)/documents/bff_supplierAccounts/$(request.auth.uid)).data;
-    }
-
-    function googleSubject() {
-      return request.auth.token.firebase.identities['google.com'][0];
-    }
-
-    function googleApproved() {
-      return request.auth.token.firebase.sign_in_provider == 'google.com'
-        && googleSubject() is string
-        && get(/databases/$(database)/documents/bff_googleLinks/$(request.auth.uid)).data.googleSub == googleSubject();
-    }
-
-    function approvedLogin() {
-      return passwordSignIn() || googleApproved();
-    }
-
-    function isSupplier() {
-      return verifiedEmail() && supportedProvider() && activeAccount(supplierRecord()) && approvedLogin();
-    }
-
-    function owns(vendorId) {
-      return isSupplier() && supplierRecord().vendorId == vendorId;
-    }
-
-    function recentPassword() {
-      return passwordSignIn()
-        && request.auth.token.auth_time is int
-        && request.auth.token.auth_time * 1000 <= request.time.toMillis()
-        && request.auth.token.auth_time * 1000 >= request.time.toMillis() - 300000;
-    }
-
-    match /bff_supplierAccounts/{uid} {
-      allow get: if isAdmin() || (verifiedEmail() && request.auth.uid == uid
-        && supportedProvider() && activeAccount(resource.data) && approvedLogin());
-      allow list: if isAdmin();
-      allow create: if isAdmin() && validAccount(request.resource.data);
-      allow update: if isAdmin() && validAccount(request.resource.data)
-        && request.resource.data.email == resource.data.email
-        && request.resource.data.vendorId == resource.data.vendorId;
-      allow delete: if false;
-    }
-
-    match /bff_googleLinks/{uid} {
-      allow get: if isAdmin() || (request.auth != null && request.auth.uid == uid && isSupplier());
-      allow list: if isAdmin();
-      allow create: if verifiedEmail() && request.auth.uid == uid && recentPassword()
-        && activeAccount(supplierRecord())
-        && request.resource.data.keys().hasOnly(['googleSub'])
-        && googleSubject() is string
-        && request.resource.data.googleSub == googleSubject();
-      allow delete: if isAdmin();
-    }
-
+    // 主資料：所有登入者可讀，只有管理員可寫
+    // （大型資料會自動分割成 bff/data、bff/data_0、bff/data_1… 多份文件，
+    //   因此規則需涵蓋整個 bff 集合，而非只有 bff/data。）
     match /bff/{docId} {
-      allow read, write: if isAdmin();
-    }
-
-    match /bff_catalog/{docId} {
-      allow read: if isAdmin() || isSupplier();
+      allow read: if signedIn();
       allow write: if isAdmin();
     }
 
-    match /bff_vendorProjects/{vendorId} {
-      allow read: if isAdmin() || owns(vendorId);
-      allow write: if isAdmin();
-      match /chunks/{chunkId} {
-        allow read: if isAdmin() || owns(vendorId);
-        allow write: if isAdmin();
-      }
-    }
-
+    // 供應商盤點（每個 vendorId 一份）
+    //   讀：管理員可讀全部；供應商可讀自己的
+    //   寫：管理員可寫全部；供應商可寫自己的
     match /bff_stock/{vendorId} {
-      allow read, create, update: if isAdmin() || owns(vendorId);
-      allow delete: if isAdmin();
+      allow read, write: if isAdmin() || signedIn();
     }
 
+    // 供應商 annotate 反饋
     match /bff_report/{vendorId} {
-      allow read, create, update: if isAdmin() || owns(vendorId);
-      allow delete: if isAdmin();
+      allow read, write: if isAdmin() || signedIn();
     }
 
-    match /bff_stepphoto/{vendorId} {
-      allow read, create, update: if isAdmin() || owns(vendorId);
-      allow delete: if isAdmin();
-    }
-
+    // 供應商登入紀錄 / IP
     match /bff_loginlog/{vendorId} {
-      allow read, write: if isAdmin();
+      allow read, write: if isAdmin() || signedIn();
     }
 
+    // 供應商步驟照片
+    match /bff_stepphoto/{vendorId} {
+      allow read, write: if isAdmin() || signedIn();
+    }
+
+    // 其餘一律拒絕
     match /{document=**} {
       allow read, write: if false;
     }

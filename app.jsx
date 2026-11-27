@@ -314,105 +314,205 @@ function Detail({ item, lang, t, onBack, onZoom, vendor, admin }) {
         }
       </section>
 
-      {vendor && <section className="block">
+      <section className="block">
         <h2 className="block-h"><span className="bh-num">06</span><span className="bh-title">{t("reportTitle")}</span></h2>
-        <ReportPanel key={vendor.uid+":"+item.id} item={item} lang={lang} t={t} vendor={vendor} admin={admin} onZoom={onZoom} />
-      </section>}
+        <ReportPanel item={item} lang={lang} t={t} vendor={vendor} admin={admin} onZoom={onZoom} />
+      </section>
     </div>);
 
 }
 
 /* ================= LOGIN ================= */
-function authMessage(error, zh) {
-  const messages = {
-    "bff/email-unverified": ["請先驗證開戶信箱，驗證後再登入。", "Verify your company email before signing in."],
-    "bff/not-provisioned": ["此帳號未開通供應商權限。請先用管理員開通的信箱和密碼登入。", "No vendor access. Sign in first with your provisioned email/password."],
-    "bff/not-admin": ["此 Google 帳號沒有管理員權限。", "This Google account is not an authorized administrator."],
-    "bff/cloud-unavailable": ["登入服務目前無法使用，公開目錄仍可查詢。", "Sign-in is unavailable; the public catalog still works."],
-    "bff/reauth-required": ["密碼確認已逾時，請重新確認。", "Password confirmation expired; please repeat it."],
-    "auth/credential-already-in-use": ["這個 Google 帳號已綁定另一個帳號。請聯絡管理員，不會自動合併。", "This Google account is already linked elsewhere. Contact the administrator; nothing was merged."],
-    "auth/account-exists-with-different-credential": ["請先用信箱和密碼登入，再從「我的帳號」綁定 Google。", "Sign in with your email/password and link Google in My account."],
-    "auth/email-already-in-use": ["此 Google 信箱有其他帳號，請聯絡管理員核對。", "This Google email belongs to another account. Contact the administrator."],
-    "auth/provider-already-linked": ["已綁定 Google。", "Google is already linked."],
-    "auth/popup-blocked": ["請允許瀏覽器的登入彈出視窗。", "Allow sign-in pop-ups and try again."],
-    "auth/unauthorized-domain": ["目前網域未啟用 Google 登入，請聯絡管理員。", "Google sign-in is not enabled on this domain."],
-    "auth/popup-closed-by-user": ["未完成 Google 驗證。", "Google verification was not completed."],
-    "auth/too-many-requests": ["目前嘗試次數過多，請稍後再試。", "Too many attempts. Try again later."],
-  };
-  return (messages[error?.code] || ["操作未成功，請檢查信箱、密碼或連線後再試。", "Could not finish. Check your credentials or connection."])[zh ? 0 : 1];
-}
-function Login({lang,setLang,t}) {
-  const zh=lang==="zh";
-  const [mode,setMode]=uState("vendor"), [email,setEmail]=uState(""), [password,setPassword]=uState("");
-  const [busy,setBusy]=uState(false), [message,setMessage]=uState(""), [error,setError]=uState(null);
-  async function run(fn, success) {
-    if (busy) return;
-    setBusy(true); setError(null); setMessage("");
-    try { if(!window.CLOUD) throw {code:"bff/cloud-unavailable"}; await fn(window.CLOUD); if (success) setMessage(success); }
-    catch(e) { setError(e); }
-    finally { setBusy(false); setPassword(""); }
+function Login({ lang, setLang, t, onLogin }) {
+  const [mode, setMode] = uState("vendor"); // vendor | admin
+  const [sel, setSel] = uState(null);
+  const [code, setCode] = uState("");
+  const [err, setErr] = uState("");
+  const [gBusy, setGBusy] = uState(false);
+  const [, bumpLogin] = uState(0);
+  const L = (o) => L2(o, lang);
+  const isAdmin = mode === "admin";
+  const cloudConfigured = !!(window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey) || !!(window.CLOUD && window.CLOUD.configured);
+
+  // Re-render when the vendor list / codes or cloud status sync in, so newly
+  // added vendors appear in the picker without a manual refresh.
+  uEffect(() => {
+    const h = () => bumpLogin((n) => n + 1);
+    window.addEventListener("bff:datachange", h);
+    window.addEventListener("bff:cloudstatus", h);
+    return () => {
+      window.removeEventListener("bff:datachange", h);
+      window.removeEventListener("bff:cloudstatus", h);
+    };
+  }, []);
+
+  async function googleSignIn() {
+    if (gBusy) return;
+    setErr("");
+    if (!window.CLOUD || !window.CLOUD.signInAdmin) {
+      setErr(lang === "zh" ? "雲端服務尚未就緒，請稍後再試或改用管理員密碼登入" : "Cloud service is not ready yet. Retry or sign in with admin password.");
+      return;
+    }
+    setGBusy(true);
+    try {
+      await window.CLOUD.signInAdmin();
+      onLogin(window.AUTH.ADMIN);
+    } catch (e) {
+      const c = e && e.code ? String(e.code) : "";
+      if (c === "auth/popup-closed-by-user" || c === "auth/cancelled-popup-request") {
+        // user closed the popup intentionally
+      } else if (c === "bff/not-admin") {
+        setErr(lang === "zh"
+          ? `此 Google 帳號${e.email ? `（${e.email}）` : ""}沒有管理員權限`
+          : `This Google account${e.email ? ` (${e.email})` : ""} is not authorized as admin`);
+      } else if (c === "auth/unauthorized-domain") {
+        setErr(lang === "zh"
+          ? "目前網域尚未加入 Firebase 授權網域，請至 Firebase Console 設定或改用密碼登入"
+          : "This domain is not in Firebase Authorized Domains. Add it in Firebase Console or use password.");
+      } else if (c === "auth/operation-not-supported-in-this-environment") {
+        setErr(lang === "zh"
+          ? "此環境不支援 Google 彈出登入（如本機檔案開啟），請改用管理員密碼登入"
+          : "Google popup sign-in is unsupported in this environment (e.g. file://). Use admin password instead.");
+      } else if (c === "auth/popup-blocked") {
+        setErr(lang === "zh"
+          ? "瀏覽器已封鎖登入視窗，請允許彈出式視窗後再試"
+          : "Sign-in popup was blocked by the browser. Please allow popups and retry.");
+      } else if (c === "cloud-unavailable") {
+        setErr(lang === "zh"
+          ? "雲端服務尚未連線或已停用，請改用管理員密碼登入"
+          : "Cloud sync is unavailable or disabled. Please sign in with admin password.");
+      } else {
+        setErr((lang === "zh" ? "Google 登入失敗：" : "Google sign-in failed: ") + (e && e.message ? e.message : String(e)));
+      }
+    } finally {
+      setGBusy(false);
+    }
   }
-  const sw=m=>{setMode(m);setError(null);setMessage("");setPassword("");};
-  return <div className="login">
-    <div className="login-bg" aria-hidden="true"/>
-    <header className="login-top">
-      <div className="brand"><span className="brand-mark"><span/></span><span className="brand-txt"><span className="brand-title">{t("appTitle")}</span><span className="brand-sub">{t("appSub")}</span></span></div>
-      <div className="langtoggle" role="group" aria-label="language"><button className={zh?"on":""} onClick={()=>setLang("zh")}>中文</button><button className={!zh?"on":""} onClick={()=>setLang("en")}>EN</button></div>
-    </header>
-    <form className="login-card" onSubmit={e=>{e.preventDefault();if(mode==="vendor")run(c=>c.signInVendor(email,password));}}>
-      <div className="login-tabs" role="tablist">
-        <button type="button" role="tab" aria-selected={mode==="vendor"} className={"login-tab"+(mode==="vendor"?" on":"")} disabled={busy} onClick={()=>sw("vendor")}>{zh?"供應商":"Vendor"}</button>
-        <button type="button" role="tab" aria-selected={mode==="admin"} className={"login-tab"+(mode==="admin"?" on":"")} disabled={busy} onClick={()=>sw("admin")}>{zh?"管理員":"Admin"}</button>
-      </div>
-      <h1 className="login-title">{mode==="vendor"?(zh?"供應商登入":"Vendor sign-in"):(zh?"管理員登入":"Admin sign-in")}</h1>
-      {mode==="vendor" ? <>
-        <p className="login-sub">{zh?"請使用管理員開通的公司信箱。第一次先設定密碼並驗證信箱，再到「我的帳號」綁定 Google。":"Use the company email provisioned by your administrator. Set your password and verify the email before linking Google in My account."}</p>
-        <label className="login-label" htmlFor="login-email">{zh?"公司信箱":"Company email"}</label>
-        <input id="login-email" className="login-input" type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} required/>
-        <label className="login-label" htmlFor="login-password">{zh?"密碼":"Password"}</label>
-        <input id="login-password" className="login-input" type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required/>
-        <button className="btn login-btn" type="submit" disabled={busy}>{zh?"以信箱登入":"Sign in with email"}</button>
-        <button type="button" className="login-google" disabled={busy} onClick={()=>run(c=>c.signInVendor("", "",true))}>{zh?"以已綁定的 Google 帳號登入":"Sign in with linked Google account"}</button>
-        <button type="button" className="btn ghost" disabled={busy||!email.trim()} onClick={()=>run(c=>c.requestReset(email),zh?"若此帳號已開通，將收到設定或重設密碼的信。":"If this account exists, a password setup/reset email will be sent.")}>{zh?"設定／重設密碼":"Set/reset password"}</button>
-        {error?.code==="bff/email-unverified"&&<button type="button" className="btn ghost" disabled={busy} onClick={()=>run(c=>c.verifyEmail(),zh?"已寄出驗證信，完成後請再登入。":"Verification email sent. Sign in again after verification.")}>{zh?"重寄驗證信":"Resend verification email"}</button>}
-      </>:<>
-        <p className="login-sub">{zh?"使用已核准的管理員 Google 帳號。":"Use an authorized administrator Google account."}</p>
-        <button type="button" className="login-google" onClick={()=>run(c=>c.signInAdmin())} disabled={busy}>{zh?"以 Google 登入管理中心":"Sign in to admin with Google"}</button>
-      </>}
-      {error && <p className="login-err" role="alert">{authMessage(error,zh)}</p>}
-      {message && <p role="status">{message}</p>}
-      <a href="#" className="btn ghost guide-link" style={{marginTop:12}}>{zh?"返回公開治具目錄":"Back to public fixture catalog"}</a>
-    </form>
-  </div>;
-}
-function VendorAccount({lang,vendor}) {
-  const zh=lang==="zh";
-  const [password,setPassword]=uState(""),[verified,setVerified]=uState(false),[busy,setBusy]=uState(false),[error,setError]=uState(null);
-  const [linked,setLinked]=uState(false), [statusReady,setStatusReady]=uState(false);
-  uEffect(()=>{
-    let alive=true;
-    window.CLOUD.googleLinkStatus().then(v=>{if(alive){setLinked(v==="active");setStatusReady(true);}}).catch(e=>{if(alive)setError(e);});
-    return ()=>{alive=false;};
-  },[vendor.uid]);
-  async function run(fn,onSuccess) {
-    if(busy)return; setBusy(true); setError(null);
-    try {await fn();onSuccess();}
-    catch(e){setError(e);if(e?.code==="bff/reauth-required")setVerified(false);}
-    finally {setBusy(false);setPassword("");}
+
+  async function submit(e) {
+    if (e) e.preventDefault();
+    if (isAdmin) {
+      if (!code.trim()) {setErr(lang === "zh" ? "請輸入存取碼" : "Enter the access code");return;}
+      const enteredHash = await window.bffSha256(code.trim());
+      if (enteredHash !== window.STORE.admincode_get()) {
+        setErr(lang === "zh" ? "管理員密碼錯誤" : "Wrong admin password");
+        return;
+      }
+      onLogin(window.AUTH.ADMIN);
+      return;
+    }
+    let target = sel;
+    if (!sel) {setErr(lang === "zh" ? "請先選擇貴公司" : "Please select your company");return;}
+    // validate against the freshest record — access codes may have just
+    // synced from the cloud after an admin changed them.
+    const live = (window.AUTH.VENDORS || []).find((v) => v.id === sel.id);
+    if (live) target = live;
+    if (!code.trim()) {setErr(lang === "zh" ? "請輸入存取碼" : "Enter the access code");return;}
+    if (code.trim() !== target.code) {
+      setErr(lang === "zh" ? "存取碼錯誤" : "Wrong access code");
+      return;
+    }
+    onLogin(target);
   }
-  return <section className="block">
-    <h1>{zh?"我的帳號":"My account"}</h1><p>{vendor.email} · {L2(vendor.name,lang)}</p>
-    <p>{linked?(zh?"Google 已綁定；仍可用信箱和密碼登入。":"Google is linked. Email/password sign-in still works."):(zh?"綁定公司管理的 Google 帳號，不會新增帳號或改變資料權限。":"Link a company-managed Google account without changing your data access.")}</p>
-    {statusReady&&!linked&&!verified&&<button className="btn" type="button" disabled={busy} onClick={()=>run(()=>window.CLOUD.linkGoogle(),()=>setVerified(true))}>{zh?"綁定 Google":"Link Google"}</button>}
-    {statusReady&&!linked&&verified&&<form onSubmit={e=>{e.preventDefault();run(()=>window.CLOUD.confirmLinkPassword(password),()=>{setVerified(false);setLinked(true);});}}>
-      <p>{zh?"再輸入公司帳號密碼，確認後才會啟用 Google 登入。":"Confirm your company-account password to activate Google sign-in."}</p>
-      <label htmlFor="link-password">{zh?"確認密碼":"Confirm password"}</label>
-      <input id="link-password" className="login-input" type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="current-password" required/>
-      <button className="btn" disabled={busy} type="submit">{zh?"確認並啟用":"Confirm and activate"}</button>
-    </form>}
-    {error&&<p className="login-err" role="alert">{authMessage(error,zh)}</p>}
-  </section>;
+
+  function switchMode(m) {setMode(m);setErr("");setCode("");}
+
+  return (
+    <div className="login">
+      <div className="login-bg" aria-hidden="true" />
+      <header className="login-top">
+        <div className="brand">
+          <span className="brand-mark"><span /></span>
+          <span className="brand-txt">
+            <span className="brand-title">{t("appTitle")}</span>
+            <span className="brand-sub">{t("appSub")}</span>
+          </span>
+        </div>
+        <div className="langtoggle" role="group" aria-label="language">
+          <button className={lang === "zh" ? "on" : ""} onClick={() => setLang("zh")}>中文</button>
+          <button className={lang === "en" ? "on" : ""} onClick={() => setLang("en")}>EN</button>
+        </div>
+      </header>
+
+      <form className="login-card" onSubmit={submit}>
+        <div className="login-tabs" role="tablist">
+          <button type="button" role="tab" aria-selected={!isAdmin}
+          className={"login-tab" + (!isAdmin ? " on" : "")} onClick={() => switchMode("vendor")}>
+            <Icon name="cube" size={15} />{lang === "zh" ? "供應商" : "Vendor"}
+          </button>
+          <button type="button" role="tab" aria-selected={isAdmin}
+          className={"login-tab" + (isAdmin ? " on" : "")} onClick={() => switchMode("admin")}>
+            <Icon name="shield" size={15} />{lang === "zh" ? "管理員" : "Admin"}
+          </button>
+        </div>
+
+        {!isAdmin ?
+        <React.Fragment>
+            <h1 className="login-title">{lang === "zh" ? "供應商登入" : "Vendor sign-in"}</h1>
+            <p className="login-sub">{lang === "zh" ? "選擇貴公司並輸入存取碼，即可查詢制具、填報庫存盤點。" : "Select your company and enter the access code to query fixtures and file stock-takes."}</p>
+            <div className="login-label">{lang === "zh" ? "選擇供應商" : "Select vendor"}</div>
+            <div className="vendor-grid">
+              {window.AUTH.VENDORS.map((v) =>
+            <button type="button" key={v.id}
+            className={"vendor-opt" + (sel && sel.id === v.id ? " on" : "")}
+            onClick={() => {setSel(v);setErr("");}}>
+                  <span className="vo-ava">{L(v.name).trim().charAt(0)}</span>
+                  <span className="vo-name">{L(v.name)}</span>
+                  {sel && sel.id === v.id && <span className="vo-check"><Icon name="check" size={13} /></span>}
+                </button>
+            )}
+            </div>
+            <div className="login-label">{lang === "zh" ? "存取碼" : "Access code"}</div>
+            <input className="login-input mono" type="password" value={code}
+          onChange={(e) => {setCode(e.target.value);setErr("");}}
+          placeholder={lang === "zh" ? "請輸入存取碼" : "Enter access code"} autoComplete="off" />
+          </React.Fragment> :
+
+        <React.Fragment>
+            <h1 className="login-title">{lang === "zh" ? "管理員登入" : "Admin sign-in"}</h1>
+            <p className="login-sub">{lang === "zh" ? "品管部管理員可檢視各供應商回報的制具庫存與需求短缺。" : "QC admins can review every vendor's reported fixture stock and shortages."}</p>
+            <div className="admin-id">
+              <span className="vo-ava admin-ava"><Icon name="shield" size={16} /></span>
+              <span className="vo-name">{L(window.AUTH.ADMIN.name)}</span>
+            </div>
+            {cloudConfigured &&
+            <React.Fragment>
+                <button type="button" className="login-google" onClick={googleSignIn} disabled={gBusy}>
+                  <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+                    <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z" />
+                    <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.71H.96v2.33A9 9 0 0 0 9 18z" />
+                    <path fill="#FBBC05" d="M3.97 10.71A5.41 5.41 0 0 1 3.69 9c0-.59.1-1.17.28-1.71V4.96H.96A9 9 0 0 0 0 9c0 1.45.35 2.82.96 4.04l3.01-2.33z" />
+                    <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.96l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z" />
+                  </svg>
+                  <span>{gBusy ? (lang === "zh" ? "Google 驗證中…" : "Signing in with Google…") : (lang === "zh" ? "以 Google 帳號快速登入" : "Sign in with Google")}</span>
+                </button>
+                <p className="login-google-hint">{lang === "zh" ? "授權管理員一次完成登入與雲端同步" : "Authorized admin signs in & syncs cloud in one step"}</p>
+                <div className="login-or"><span>{lang === "zh" ? "或使用管理員密碼" : "or use admin password"}</span></div>
+              </React.Fragment>
+            }
+            <div className="login-label">{lang === "zh" ? "管理員密碼" : "Admin password"}</div>
+            <input className="login-input mono" type="password" value={code}
+          onChange={(e) => {setCode(e.target.value);setErr("");}}
+          placeholder={lang === "zh" ? "請輸入存取碼" : "Enter access code"} autoComplete="off" />
+          </React.Fragment>
+        }
+
+        {err && <div className="login-err"><Icon name="x" size={14} />{err}</div>}
+
+        <button className="btn login-btn" type="submit" disabled={gBusy}>
+          <Icon name="logout" size={16} />{lang === "zh" ? "登入系統" : "Sign in"}
+        </button>
+        {!isAdmin &&
+        <a className="btn ghost guide-link" href="供應商流程指引 麥當勞版 (DEMO 中英).html" target="_blank" rel="noopener"
+        style={{ width: "100%", marginTop: 12, justifyContent: "center", textDecoration: "none" }}>
+            <Icon name="file" size={16} />{lang === "zh" ? "供應商指引教學" : "Supplier process guide (tutorial)"}
+          </a>
+        }
+      </form>
+    </div>);
+
 }
+
 /* ================= APP ================= */
 /* Compact cloud-sync status light for the top bar (mirrors the fuller status
    inside Manage → Backup → CloudPanel). Only shown once cloud is configured;
@@ -491,7 +591,7 @@ function App() {
   }, []);
 
   uEffect(() => {
-    const h = () => {setZoom(null);setVendor(window.AUTH.get());};
+    const h = () => setVendor(window.AUTH.get());
     window.addEventListener("bff:authchange", h);
     return () => window.removeEventListener("bff:authchange", h);
   }, []);
@@ -509,14 +609,26 @@ function App() {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+  // Enforce #/login as the sole entry URL when signed out (no public catalog);
+  // after signing in, redirect away from #/login to the main app home (#/).
+  uEffect(() => {
+    if (!vendor) {
+      if (location.hash !== "#/login") {
+        try { history.replaceState(null, "", "#/login"); } catch (e) { location.hash = "#/login"; }
+        setRoute({ name: "login" });
+      }
+    } else if (location.hash === "#/login") {
+      try { history.replaceState(null, "", "#/"); } catch (e) { location.hash = ""; }
+      setRoute({ name: "list" });
+    }
+  }, [vendor, route.name]);
   const [, bump] = uState(0);
   uEffect(() => {
     const h = () => bump((n) => n + 1);
     window.addEventListener("bff:stockchange", h);
     window.addEventListener("bff:datachange", h);
     window.addEventListener("bff:reportchange", h);
-    window.addEventListener("bff:cloudstatus", h);
-    return () => {window.removeEventListener("bff:stockchange", h);window.removeEventListener("bff:datachange", h);window.removeEventListener("bff:reportchange", h);window.removeEventListener("bff:cloudstatus", h);};
+    return () => {window.removeEventListener("bff:stockchange", h);window.removeEventListener("bff:datachange", h);window.removeEventListener("bff:reportchange", h);};
   }, []);
 
   const open = (id) => {location.hash = "#/item/" + id;};
@@ -541,9 +653,15 @@ function App() {
   const dir = window.THEMES[tw.direction];
   const admin = window.AUTH.isAdmin(vendor);
 
-  const publicPages = ["list", "detail", "fixtures", "fixtureDetail"];
-  if (!vendor && !publicPages.includes(route.name)) return <Login lang={lang} setLang={setLang} t={t} />;
-  const canWrite = !!window.CLOUD?.readyForWrites;
+  if (!vendor) {
+    return <Login lang={lang} setLang={setLang} t={t} onLogin={(v) => {
+      window.AUTH.set(v);
+      if (location.hash === "#/login") {
+        try { history.replaceState(null, "", "#/"); } catch (e) { location.hash = ""; }
+        setRoute({ name: "list" });
+      }
+    }} />;
+  }
 
   return (
     <div className="app">
@@ -556,7 +674,7 @@ function App() {
           </span>
         </button>
         <nav className="topnav" aria-label="sections">
-          {vendor && !admin && window.STORE.testcodes_forVendor(vendor.id).length > 0 &&
+          {!admin && window.STORE.testcodes_forVendor(vendor.id).length > 0 &&
           <button className={"topnav-btn" + (route.name === "projects" ? " on" : "")} onClick={goProjects}>
               <Icon name="grid" size={15} />{lang === "zh" ? "目前專案" : "Current projects"}
             </button>
@@ -594,21 +712,21 @@ function App() {
               </button>
             </React.Fragment> :
 
-          vendor && <button className={"topnav-btn" + (route.name === "stock" ? " on" : "")} onClick={goStock}>
+          <button className={"topnav-btn" + (route.name === "stock" ? " on" : "")} onClick={goStock}>
               <Icon name="clipboard" size={15} />{lang === "zh" ? "庫存盤點" : "Stock-take"}
             </button>
           }
-          {vendor && !admin &&
+          {!admin &&
           <button className={"topnav-btn" + (route.name === "equipStock" ? " on" : "")} onClick={goEquipStock}>
               <Icon name="bolt" size={15} />{lang === "zh" ? "設備盤點" : "Equipment"}
             </button>
           }
-          {vendor && !admin &&
+          {!admin &&
           <button className={"topnav-btn" + (route.name === "anomaly" ? " on" : "")} onClick={goAnomaly}>
               <Icon name="file" size={15} />{lang === "zh" ? "異常申請" : "Anomaly"}
             </button>
           }
-          {vendor && !admin &&
+          {!admin &&
           <button className={"topnav-btn" + (route.name === "notices" ? " on" : "")} onClick={goNotices}>
               <Icon name="bell" size={15} />{lang === "zh" ? "變更通知" : "Change notices"}
             </button>
@@ -617,10 +735,8 @@ function App() {
         <div className="topbar-right">
           <CloudStatusLight lang={lang} admin={admin} onOpen={admin ? goManage : undefined} />
           {admin && <NotificationCenter lang={lang} onOpenStock={goAdmin} />}
-          {vendor && !admin && <VendorAlertBell lang={lang} onGoStock={goStock} onGoEquip={goEquipStock} />}
-          {!vendor && <a href="#/login" className="btn">{lang==="zh"?"登入":"Sign in"}</a>}
-          {vendor && !admin && <a href="#/account" className="btn ghost">{lang==="zh"?"我的帳號":"My account"}</a>}
-          {vendor && <div className={"vendor-chip" + (admin ? " is-admin" : "")} title={L2(vendor.name, lang)}>
+          {!admin && <VendorAlertBell lang={lang} onGoStock={goStock} onGoEquip={goEquipStock} />}
+          <div className={"vendor-chip" + (admin ? " is-admin" : "")} title={L2(vendor.name, lang)}>
             <span className="vendor-ava">{admin ? <Icon name="shield" size={15} /> : (L2(vendor.name, lang) || "?").trim().charAt(0)}</span>
             <span className="vendor-txt">
               <span className="vendor-k">{admin ? lang === "zh" ? "管理員" : "Admin" : lang === "zh" ? "供應商" : "Vendor"}</span>
@@ -629,7 +745,7 @@ function App() {
             <button className="vendor-out" onClick={() => window.AUTH.logout()} title={lang === "zh" ? "登出" : "Sign out"}>
               <Icon name="logout" size={15} />
             </button>
-          </div>}
+          </div>
           <div className="langtoggle" role="group" aria-label="language">
             <button className={lang === "zh" ? "on" : ""} onClick={() => setLang("zh")}>中文</button>
             <button className={lang === "en" ? "on" : ""} onClick={() => setLang("en")}>EN</button>
@@ -641,13 +757,9 @@ function App() {
         </div>
       </header>
 
-      <main className="main" key={vendor?.uid || "public"}>
-        {vendor && !canWrite && !publicPages.includes(route.name) && route.name !== "account" && route.name !== "login" ?
-        <p role="status" className="block">{lang==="zh"?"正在連線驗證資料，暫時無法編輯。":"Verifying your data connection; editing is unavailable."}</p> :
-        route.name === "account" && vendor && !admin ?
-        <VendorAccount key={vendor.uid} lang={lang} vendor={vendor}/> :
-        route.name === "detail" && item ?
-        <Detail item={item} lang={lang} t={t} onBack={goTests} vendor={canWrite ? vendor : null} admin={canWrite && admin} onZoom={(src, cap) => setZoom({ src, cap })} /> :
+      <main className="main">
+        {route.name === "detail" && item ?
+        <Detail item={item} lang={lang} t={t} onBack={goTests} vendor={vendor} admin={admin} onZoom={(src, cap) => setZoom({ src, cap })} /> :
         route.name === "fixtureDetail" ?
         <FixtureDetail fxKey={route.key} lang={lang} t={t} onBack={goFixtures} onOpenTest={open} onZoom={(src, cap) => setZoom({ src, cap })} /> :
         route.name === "fixtures" ?
@@ -680,7 +792,7 @@ function App() {
       </main>
 
       <footer className="footer no-print">
-        <span>{lang === "zh" ? "腳踏車品管部門 · 測試制具查詢系統 · " + (admin ? "管理員版" : vendor ? "供應商版" : "公開目錄") : "Bicycle QC · Test Fixture Finder · " + (admin ? "Admin" : vendor ? "Supplier" : "Public") + " edition"}</span>
+        <span>{lang === "zh" ? "腳踏車品管部門 · 測試制具查詢系統 · " + (admin ? "管理員版" : "供應商版") : "Bicycle QC · Test Fixture Finder · " + (admin ? "Admin" : "Supplier") + " edition"}</span>
         <span className="mono foot-dir">{dir && L2(dir.label, lang)}</span>
       </footer>
 
@@ -725,8 +837,7 @@ function L2(o, lang) {return o && o[lang] != null ? o[lang] : o && o.en || o;}
 
 function parseRoute() {
   const h = location.hash;
-  if (h === "#/login") return {name:"login"};
-  if (h === "#/account") return {name:"account"};
+  if (h === "#/login") return { name: "login" };
   if (h.startsWith("#/item/")) return { name: "detail", id: h.replace("#/item/", "") };
   if (h.startsWith("#/fixture/")) return { name: "fixtureDetail", key: h.replace("#/fixture/", "") };
   if (h.startsWith("#/fixtures")) return { name: "fixtures" };

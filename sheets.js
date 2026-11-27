@@ -27,13 +27,49 @@
   }
   function isEnabled() {
     const c = getConfig();
-    return false; // Do not send private supplier data from a public browser to an owner-executed webhook.
+    return !!(c.enabled && c.url && /^https:\/\//i.test(c.url));
   }
 
-  async function postPayload() {
-    throw new Error("Google Sheets direct browser sync is paused; use a verified server-side route.");
+  async function postPayload(payload, overrideCfg) {
+    const c = overrideCfg ? Object.assign({}, getConfig(), overrideCfg) : getConfig();
+    if (!c.url || !/^https:\/\//i.test(c.url)) return { ok: false, skipped: true };
+    const body = Object.assign({}, payload);
+    if (c.secret) body.secret = c.secret;
+    const jsonStr = JSON.stringify(body);
+    try {
+      // text/plain avoids CORS preflight (OPTIONS) which Apps Script Web Apps do not handle.
+      const resp = await fetch(c.url, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: jsonStr,
+        redirect: "follow",
+      });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      try {
+        const data = await resp.json();
+        return data && typeof data === "object" ? data : { ok: true };
+      } catch (e) {
+        return { ok: true };
+      }
+    } catch (e) {
+      // Fallback: no-cors fire-and-forget (useful if a corporate proxy strips CORS headers)
+      if (payload && payload.type !== "ping") {
+        try {
+          await fetch(c.url, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: jsonStr });
+          return { ok: true, opaque: true };
+        } catch (e2) {}
+      }
+      throw e;
+    }
   }
-  const testConnection = postPayload;
+
+  async function testConnection(overrideCfg) {
+    const res = await postPayload({ type: "ping" }, overrideCfg);
+    if (!res || res.ok === false) {
+      throw new Error((res && res.error) ? res.error : "connection_failed");
+    }
+    return res;
+  }
 
   function vendorLabel(v) {
     if (!v) return "—";
@@ -117,7 +153,7 @@
   function anomalies_forVendor(vendorId) {
     if (!vendorId || !window.bffReportGet) return [];
     const map = window.bffReportGet(vendorId) || {};
-    return Array.isArray(map.__anomalies) ? [...map.__anomalies].sort((a,b)=>b.at-a.at) : [];
+    return Array.isArray(map.__anomalies) ? map.__anomalies : [];
   }
   function anomalies_all() {
     const vendors = (window.STORE && window.STORE.vendors_list && window.STORE.vendors_list())
@@ -148,13 +184,26 @@
       urgency: String(input.urgency || "一般"),
       target: String(input.target || "").trim() || "—",
       desc: String(input.desc || "").trim(),
-      reporter: window.AUTH.get()?.email || "",
+      reporter: String(input.reporter || "").trim() || vendorLabel(vendor),
       status: "待處理",
     };
-    // Preserve the existing collection; acknowledge only after a server write.
-    await window.CLOUD.appendAnomaly(vid,rec);
-    return {record:rec,sheetSynced:false};
-
+    // Persist inside existing bff_report/<vendorId> doc so Firestore sync works with zero rule changes.
+    if (window.bffReportGet && window.bffReportPut) {
+      const map = Object.assign({}, window.bffReportGet(vid) || {});
+      const list = Array.isArray(map.__anomalies) ? map.__anomalies.slice() : [];
+      list.unshift(rec);
+      map.__anomalies = list.slice(0, 100);
+      window.bffReportPut(vid, map);
+      window.dispatchEvent(new CustomEvent("bff:reportchange"));
+    }
+    let sheetSynced = false;
+    if (isEnabled()) {
+      try {
+        const r = await postPayload({ type: "anomaly", data: rec });
+        sheetSynced = !!(r && r.ok);
+      } catch (e) { sheetSynced = false; }
+    }
+    return { record: rec, sheetSynced };
   }
 
   window.SHEETS = {
