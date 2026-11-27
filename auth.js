@@ -24,14 +24,14 @@
   // as plaintext, since Firestore's rules let any signed-in visitor (incl.
   // anonymous) read the shared master doc. ADMIN has no `.code` property;
   // Login hashes the entered value and compares to window.STORE.admincode_get().
-  const KEY = "bff:vendor";
-  function get() { try { return JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) { return null; } }
+  const KEY = "giantbike:session";
+  function get() { try { return JSON.parse(sessionStorage.getItem(KEY) || "null"); } catch (e) { return null; } }
   function set(v) {
-    try { localStorage.setItem(KEY, JSON.stringify(v)); } catch (e) {}
+    try { sessionStorage.setItem(KEY, JSON.stringify(v)); } catch (e) {}
     recordLogin(v);
     window.dispatchEvent(new CustomEvent("bff:authchange"));
   }
-  function logout() { try { localStorage.removeItem(KEY); } catch (e) {} window.dispatchEvent(new CustomEvent("bff:authchange")); }
+  function logout() { try { sessionStorage.removeItem(KEY); } catch (e) {} window.dispatchEvent(new CustomEvent("bff:authchange")); }
   function isAdmin(u) { return !!(u && u.role === "admin"); }
   /* read a given vendor's stock-take map: { partKey: {qty, by, at} } */
   function stockOf(vendorId) { try { return JSON.parse(localStorage.getItem("bff:stock:" + vendorId) || "{}"); } catch (e) { return {}; } }
