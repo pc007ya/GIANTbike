@@ -149,7 +149,39 @@
     }).catch(function () { return { ok: false }; });
   }
 
-  /* ---- 3) Anomaly request storage (synced via existing bff_report/<vendorId>.__anomalies) + Sheets sync ---- */
+  /* ---- 3) Anomaly request storage (synced via existing bff_report/<vendorId>.__anomalies)
+     + silent background Google Form submission (no page redirect, no Apps Script required) ---- */
+  const ANOMALY_FORM = {
+    actionUrl: "https://docs.google.com/forms/d/e/1FAIpQLSc8Ud9aA_-wKfBwMtWRtEelT93IhM0J2fuGjphCiv7pvd7GeA/formResponse",
+    fields: {
+      vendor: "entry.1613477929",
+      category: "entry.212094114",
+      urgency: "entry.1269033899",
+      target: "entry.250056431",
+      desc: "entry.644312681",
+      reporter: "entry.1922749733",
+      ticketId: "entry.1934026452",
+    },
+  };
+  async function postAnomalyGoogleForm(rec) {
+    if (!ANOMALY_FORM.actionUrl || typeof fetch !== "function") return false;
+    const params = new URLSearchParams();
+    params.append(ANOMALY_FORM.fields.vendor, rec.vendor || "");
+    params.append(ANOMALY_FORM.fields.category, rec.category || "");
+    params.append(ANOMALY_FORM.fields.urgency, rec.urgency || "");
+    params.append(ANOMALY_FORM.fields.target, rec.target || "");
+    params.append(ANOMALY_FORM.fields.desc, rec.desc || "");
+    params.append(ANOMALY_FORM.fields.reporter, rec.reporter || "");
+    params.append(ANOMALY_FORM.fields.ticketId, rec.ticketId || "");
+    await fetch(ANOMALY_FORM.actionUrl, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      body: params.toString(),
+    });
+    return true;
+  }
+
   function anomalies_forVendor(vendorId) {
     if (!vendorId || !window.bffReportGet) return [];
     const map = window.bffReportGet(vendorId) || {};
@@ -196,6 +228,8 @@
       window.bffReportPut(vid, map);
       window.dispatchEvent(new CustomEvent("bff:reportchange"));
     }
+    let formSynced = false;
+    try { formSynced = await postAnomalyGoogleForm(rec); } catch (e) { formSynced = false; }
     let sheetSynced = false;
     if (isEnabled()) {
       try {
@@ -203,11 +237,12 @@
         sheetSynced = !!(r && r.ok);
       } catch (e) { sheetSynced = false; }
     }
-    return { record: rec, sheetSynced };
+    return { record: rec, formSynced, sheetSynced };
   }
 
   window.SHEETS = {
     DEFAULT_SHEET_URL,
+    ANOMALY_FORM,
     getConfig,
     setConfig,
     isEnabled,

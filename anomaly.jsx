@@ -66,6 +66,7 @@ function AnomalyPage({ lang, vendor, admin }) {
   }, [lang]);
 
   const mine = (window.SHEETS && window.SHEETS.anomalies_forVendor) ? window.SHEETS.anomalies_forVendor(vid) : [];
+  const formOn = !!(window.SHEETS && window.SHEETS.ANOMALY_FORM && window.SHEETS.ANOMALY_FORM.actionUrl);
   const sheetsOn = !!(window.SHEETS && window.SHEETS.isEnabled && window.SHEETS.isEnabled());
 
   async function submit(e) {
@@ -85,8 +86,8 @@ function AnomalyPage({ lang, vendor, admin }) {
       setMsg({
         ok: true,
         t: zh
-          ? `已送出異常申請（單號 ${r.record.ticketId}）${r.sheetSynced ? "，並已自動同步至 Google 試算表「異常申請」分頁。" : "，已同步至品管後台。"}`
-          : `Submitted anomaly ${r.record.ticketId}${r.sheetSynced ? " & synced to Google Sheet." : " & synced to QC."}`,
+          ? `已送出異常申請（單號 ${r.record.ticketId}）${r.formSynced ? "，已於背景自動寫入 Google 表單與試算表。" : r.sheetSynced ? "，已同步至 Google 試算表。" : "，已同步至品管後台。"}`
+          : `Submitted anomaly ${r.record.ticketId}${r.formSynced ? " & silently synced to Google Form / Sheet." : " & synced to QC."}`,
       });
     } catch (err) {
       setMsg({ ok: false, t: (zh ? "送出失敗：" : "Submit failed: ") + (err && err.message || err) });
@@ -102,8 +103,8 @@ function AnomalyPage({ lang, vendor, admin }) {
           <div className="hero-kicker"><span className="kick-dot" />{zh ? "供應商回報 · 即時連動品管" : "Supplier report · live to QC"}</div>
           <h1 className="hero-title">{zh ? "異常申請" : "Anomaly request"}</h1>
           <p className="hero-hint">{zh
-            ? "制具損壞、缺件、設備故障或測試過程異常時，請由此填報；送出後即時通知品管" + (sheetsOn ? "並自動寫入 Google 試算表。" : "。")
-            : "Report damaged/missing fixtures, equipment failures, or test anomalies directly to QC" + (sheetsOn ? " and Google Sheets." : ".")}</p>
+            ? "制具損壞、缺件、設備故障或測試過程異常時，請由此填報；送出後不跳頁，背景自動寫入 Google 表單與試算表並通知品管。"
+            : "Report damaged/missing fixtures, equipment failures, or test anomalies here — submits silently to Google Form & QC without leaving this page."}</p>
         </div>
       </section>
 
@@ -147,7 +148,11 @@ function AnomalyPage({ lang, vendor, admin }) {
               <Icon name="upload" size={16} />{busy ? (zh ? "送出中…" : "Submitting…") : (zh ? "送出異常申請" : "Submit anomaly request")}
             </button>
             <span className="an-sync-tag mono">
-              {sheetsOn ? (zh ? "● 已開啟 Google 試算表自動同步" : "● Google Sheets sync active") : (zh ? "● 同步至品管後台" : "● Syncing to QC")}
+              {formOn
+                ? (zh ? "● 已連動 Google 表單（背景送出，不跳頁）" : "● Google Form silent sync active")
+                : sheetsOn
+                  ? (zh ? "● 已開啟 Google 試算表自動同步" : "● Google Sheets sync active")
+                  : (zh ? "● 同步至品管後台" : "● Syncing to QC")}
             </span>
           </div>
         </form>
